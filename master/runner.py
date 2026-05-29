@@ -4,7 +4,6 @@ Shared runner logic — used by both run_all.py (CLI) and app.py (web dashboard)
 
 import json
 import os
-import re
 import subprocess
 import time
 from datetime import datetime
@@ -34,32 +33,7 @@ SSPS = [
 ]
 
 HISTORY_PATH    = HERE / "history.json"
-OVERRIDES_PATH  = HERE / "overrides.json"
 MAX_HISTORY     = 50
-
-
-# ── Overrides (destination sheet per SSP) ─────────────────────────────────────
-
-def load_overrides() -> dict:
-    if not OVERRIDES_PATH.exists():
-        return {}
-    try:
-        return json.loads(OVERRIDES_PATH.read_text())
-    except Exception:
-        return {}
-
-
-def save_overrides(overrides: dict) -> None:
-    OVERRIDES_PATH.write_text(json.dumps(overrides, indent=2))
-
-
-SHEET_URL_RE = re.compile(r"/spreadsheets/d/([a-zA-Z0-9_-]+)")
-
-
-def extract_sheet_id(value: str) -> str:
-    value = (value or "").strip()
-    m = SHEET_URL_RE.search(value)
-    return m.group(1) if m else value
 
 
 # ── Per-SSP run ───────────────────────────────────────────────────────────────
@@ -76,9 +50,6 @@ def run_one(name: str, folder: Path) -> dict:
                 "error": f"Missing script: {script}", "output": ""}
 
     env = os.environ.copy()
-    overrides = load_overrides().get(name, {})
-    if overrides.get("spreadsheet_id"):
-        env["SHEETS_SPREADSHEET_ID"] = overrides["spreadsheet_id"]
 
     start = time.time()
     proc = subprocess.run(

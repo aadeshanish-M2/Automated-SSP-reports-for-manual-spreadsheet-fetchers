@@ -21,9 +21,6 @@ from runner import (
     run_one,
     load_history,
     save_run,
-    load_overrides,
-    save_overrides,
-    extract_sheet_id,
 )
 
 
@@ -399,43 +396,6 @@ st.markdown(
     "</p>",
     unsafe_allow_html=True,
 )
-
-# ── Settings: destination Google Sheet per SSP ────────────────────────────────
-
-overrides = load_overrides()
-
-with st.expander("Settings — destination Google Sheet per SSP", expanded=False):
-    st.caption(
-        "Paste a Google Sheets URL or just the sheet ID. "
-        "Leave blank to use the script's built-in default. "
-        "Remember to share the sheet with the service account "
-        "(`theseus@dfp-api-157606.iam.gserviceaccount.com`) as Editor."
-    )
-
-    new_overrides = {}
-    for name, _ in SSPS:
-        current = overrides.get(name, {}).get("spreadsheet_id", "")
-        value = st.text_input(
-            f"{name}",
-            value=current,
-            key=f"sheet_input_{name}",
-            placeholder="https://docs.google.com/spreadsheets/d/...",
-        )
-        cleaned = extract_sheet_id(value)
-        if cleaned:
-            new_overrides[name] = {"spreadsheet_id": cleaned}
-            st.caption(
-                f"↳ writes to [`{cleaned}`](https://docs.google.com/spreadsheets/d/{cleaned}/edit)"
-            )
-        else:
-            st.caption("↳ using built-in default")
-
-    if st.button("Save settings"):
-        save_overrides(new_overrides)
-        st.success("Settings saved.")
-        overrides = new_overrides
-
-st.divider()
 
 # ── Run controls ──────────────────────────────────────────────────────────────
 
