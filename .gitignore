@@ -15,6 +15,11 @@ master/share_config.json
 # Streamlit secrets (only for local dev; cloud uses Streamlit's encrypted panel)
 .streamlit/secrets.toml
 
+# Generated secrets file used once to bootstrap Streamlit Cloud Secrets panel.
+# Contains plaintext credentials — must NEVER reach GitHub.
+STREAMLIT_SECRETS_TO_PASTE.toml
+**/STREAMLIT_SECRETS_TO_PASTE.toml
+
 # Debug / local files
 **/*.png
 !assets/*.png
