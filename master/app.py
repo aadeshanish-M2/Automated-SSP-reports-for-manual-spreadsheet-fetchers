@@ -59,45 +59,6 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-
-# ── Optional password gate (active when SHARE_PASSWORD env var is set) ────────
-_SHARE_PASSWORD = os.environ.get("SHARE_PASSWORD", "").strip()
-if _SHARE_PASSWORD:
-    if "authed" not in st.session_state:
-        st.session_state.authed = False
-    if not st.session_state.authed:
-        st.markdown(
-            """
-            <style>
-              html, body, .stApp { background:#000 !important; color:#00ff41 !important;
-                font-family:'Courier New', monospace !important; }
-              h2 { color:#00ff41 !important; text-align:center;
-                text-shadow:0 0 10px rgba(0,255,65,0.6);
-                font-family:'Courier New', monospace !important; }
-              .stTextInput input { background:rgba(0,20,5,0.7) !important;
-                color:#00ff41 !important; border:1px solid #00ff41 !important;
-                font-family:'Courier New', monospace !important; }
-              .stButton button, .stFormSubmitButton button {
-                background:transparent !important; color:#00ff41 !important;
-                border:1px solid #00ff41 !important;
-                font-family:'Courier New', monospace !important;
-                text-transform:uppercase; letter-spacing:2px; }
-            </style>
-            <h2>◉ Access required</h2>
-            """,
-            unsafe_allow_html=True,
-        )
-        with st.form("login"):
-            pwd = st.text_input("Password", type="password")
-            submitted = st.form_submit_button("Enter")
-            if submitted:
-                if pwd == _SHARE_PASSWORD:
-                    st.session_state.authed = True
-                    st.rerun()
-                else:
-                    st.error("Wrong password.")
-        st.stop()
-
 # ── Matrix rain background ────────────────────────────────────────────────────
 
 KATAKANA = (
