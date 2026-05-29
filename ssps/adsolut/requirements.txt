@@ -1,0 +1,5 @@
+playwright==1.52
+pandas
+google-auth
+google-auth-httplib2
+google-api-python-client

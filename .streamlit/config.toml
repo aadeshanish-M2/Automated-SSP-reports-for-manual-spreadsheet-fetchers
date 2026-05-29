@@ -1,0 +1,13 @@
+# Streamlit runtime config. Theme is applied via app.py custom CSS, but we set
+# the base here so Streamlit's own widgets pick sensible defaults.
+[theme]
+base = "dark"
+primaryColor = "#00ff41"
+backgroundColor = "#000000"
+secondaryBackgroundColor = "#0a0a0a"
+textColor = "#f5f1ee"
+font = "monospace"
+
+[server]
+headless = true
+runOnSave = false

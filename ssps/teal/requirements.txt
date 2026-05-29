@@ -1,0 +1,5 @@
+playwright==1.52.0
+google-auth==2.40.0
+google-auth-httplib2==0.2.0
+google-api-python-client==2.166.0
+pandas==2.2.3

@@ -1,0 +1,128 @@
+"""
+Shared runner logic — used by both run_all.py (CLI) and app.py (web dashboard).
+"""
+
+import json
+import os
+import re
+import subprocess
+import time
+from datetime import datetime
+from pathlib import Path
+
+# ── Project layout ────────────────────────────────────────────────────────────
+# Single repo, ready for cloud deploy:
+#   project_root/
+#   ├── master/        ← this file, app.py, run_all.py
+#   ├── ssps/<slug>/   ← each SSP's main.py
+#   └── .venv/         ← single shared venv at the project root
+
+HERE         = Path(__file__).parent        # …/master
+PROJECT_ROOT = HERE.parent                  # project root
+SSPS_DIR     = PROJECT_ROOT / "ssps"
+
+SSPS = [
+    ("Teal",       SSPS_DIR / "teal"),
+    ("Nexxen",     SSPS_DIR / "nexxen"),
+    ("MGID",       SSPS_DIR / "mgid"),
+    ("Kuantyx",    SSPS_DIR / "kuantyx"),
+    ("Adsolut",    SSPS_DIR / "adsolut"),
+    ("Yandex",     SSPS_DIR / "yandex"),
+    ("Connatix",   SSPS_DIR / "connatix"),
+    ("Insticator", SSPS_DIR / "insticator"),
+    ("Vidoomy",    SSPS_DIR / "vidoomy"),
+]
+
+HISTORY_PATH    = HERE / "history.json"
+OVERRIDES_PATH  = HERE / "overrides.json"
+MAX_HISTORY     = 50
+
+
+# ── Overrides (destination sheet per SSP) ─────────────────────────────────────
+
+def load_overrides() -> dict:
+    if not OVERRIDES_PATH.exists():
+        return {}
+    try:
+        return json.loads(OVERRIDES_PATH.read_text())
+    except Exception:
+        return {}
+
+
+def save_overrides(overrides: dict) -> None:
+    OVERRIDES_PATH.write_text(json.dumps(overrides, indent=2))
+
+
+SHEET_URL_RE = re.compile(r"/spreadsheets/d/([a-zA-Z0-9_-]+)")
+
+
+def extract_sheet_id(value: str) -> str:
+    value = (value or "").strip()
+    m = SHEET_URL_RE.search(value)
+    return m.group(1) if m else value
+
+
+# ── Per-SSP run ───────────────────────────────────────────────────────────────
+
+def run_one(name: str, folder: Path) -> dict:
+    # Use the same Python interpreter that's running this process — single
+    # shared venv at the project root (or whatever is on PATH on cloud).
+    import sys as _sys
+    python = Path(_sys.executable)
+    script = folder / "main.py"
+
+    if not script.exists():
+        return {"name": name, "ok": False, "elapsed": 0.0,
+                "error": f"Missing script: {script}", "output": ""}
+
+    env = os.environ.copy()
+    overrides = load_overrides().get(name, {})
+    if overrides.get("spreadsheet_id"):
+        env["SHEETS_SPREADSHEET_ID"] = overrides["spreadsheet_id"]
+
+    start = time.time()
+    proc = subprocess.run(
+        [str(python), str(script)],
+        cwd=str(folder),
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    elapsed = time.time() - start
+
+    output = (proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else "")
+    if proc.returncode == 0:
+        return {"name": name, "ok": True, "elapsed": elapsed,
+                "error": "", "output": output}
+
+    lines = [l for l in (proc.stderr or proc.stdout).strip().splitlines() if l.strip()]
+    last = lines[-1] if lines else "(no output)"
+    return {"name": name, "ok": False, "elapsed": elapsed,
+            "error": last, "output": output}
+
+
+# ── History persistence ───────────────────────────────────────────────────────
+
+def load_history() -> list[dict]:
+    if not HISTORY_PATH.exists():
+        return []
+    try:
+        return json.loads(HISTORY_PATH.read_text())
+    except Exception:
+        return []
+
+
+def save_run(results: list[dict]) -> None:
+    history = load_history()
+    entry = {
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "results": [
+            {"name": r["name"], "ok": r["ok"],
+             "elapsed": round(r["elapsed"], 1),
+             "error": r["error"]}
+            for r in results
+        ],
+    }
+    history.insert(0, entry)
+    history = history[:MAX_HISTORY]
+    HISTORY_PATH.write_text(json.dumps(history, indent=2))

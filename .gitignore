@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Local credentials & artifacts — NEVER push these to GitHub
+**/config.json
+**/service_account.json
+**/storage_state.json
+master/history.json
+master/overrides.json
+master/share_config.json
+
+# Streamlit secrets (only for local dev; cloud uses Streamlit's encrypted panel)
+.streamlit/secrets.toml
+
+# Debug / local files
+**/*.png
+!assets/*.png
+**/*.csv
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
