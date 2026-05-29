@@ -191,16 +191,29 @@ def process_csv(csv_path: Path) -> pd.DataFrame:
             "       Aborting to protect the sheet."
         )
 
-    # Parse dates — Looker Studio exports them as "14 May 2026". Pin the format,
-    # because to_datetime's auto-inference silently fails on some rows.
-    df["Date"] = pd.to_datetime(df["Date"], format="%d %b %Y", errors="coerce")
+    # Parse dates — Looker Studio normally exports them as "14 May 2026", but
+    # on the cloud the locale / output can shift. Try the pinned format first,
+    # then fall back to pandas' auto-inference if too many rows fail.
+    sample_dates = df["Date"].astype(str).head(5).tolist()
+    log(f"Date column sample (first 5 raw values): {sample_dates}")
+
+    parsed = pd.to_datetime(df["Date"], format="%d %b %Y", errors="coerce")
+    if parsed.isna().sum() > len(df) * 0.5:
+        log("Pinned format parsed <50% of rows; falling back to auto-inference.")
+        parsed = pd.to_datetime(df["Date"], errors="coerce", dayfirst=True)
+
+    df["Date"] = parsed
     bad_dates = df["Date"].isna().sum()
     if bad_dates:
-        log(f"WARNING: {bad_dates} row(s) had unparseable dates and will be dropped.")
+        log(f"WARNING: {bad_dates} of {len(df)} row(s) had unparseable dates and will be dropped.")
         df = df.dropna(subset=["Date"])
 
     if df.empty:
-        sys.exit("ERROR: No valid rows remain after date parsing — aborting.")
+        sys.exit(
+            "ERROR: No valid rows remain after date parsing — aborting.\n"
+            f"       Raw date samples were: {sample_dates}\n"
+            "       The format may have shifted (locale / cloud rendering)."
+        )
 
     newest = df["Date"].max()
     age_days = (datetime.now() - newest).days
