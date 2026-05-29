@@ -385,7 +385,7 @@ st.markdown(matrix_rain(), unsafe_allow_html=True)
 
 # ── Header ────────────────────────────────────────────────────────────────────
 
-_header_img = Path(__file__).parent / "assets" / "matrix-header.png"
+_header_img = Path(__file__).parent.parent / "assets" / "matrix-header.png"
 if _header_img.exists():
     # Source is 1254×627 (2:1). width=400 gives ≈200px tall. Centered via columns.
     _l, _c, _r = st.columns([1, 1.2, 1])
