@@ -1,5 +1,3 @@
-# System-level packages Streamlit Cloud installs (apt-get) before Python deps.
-# Playwright's Chromium needs these shared libraries on a vanilla Linux image.
 libnss3
 libnspr4
 libatk1.0-0

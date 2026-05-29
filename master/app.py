@@ -7,8 +7,11 @@ Run with:
 
 from __future__ import annotations
 
+import os
 import random
 import string
+import subprocess
+import sys
 from pathlib import Path
 
 import streamlit as st
@@ -22,6 +25,32 @@ from runner import (
     save_overrides,
     extract_sheet_id,
 )
+
+
+# ── First-boot: install Playwright Chromium if missing ────────────────────────
+# Streamlit Cloud doesn't run a setup script after pip install, so we lazily
+# install the Chromium binary the first time the app boots. ~30s one-time cost
+# per fresh container; subsequent reboots see the cached binary.
+@st.cache_resource
+def _ensure_chromium_installed() -> None:
+    cache_dir = Path(os.environ.get("PLAYWRIGHT_BROWSERS_PATH",
+                                    str(Path.home() / ".cache" / "ms-playwright")))
+    if cache_dir.exists() and any(cache_dir.glob("chromium*-*")):
+        return
+    try:
+        subprocess.run(
+            [sys.executable, "-m", "playwright", "install", "chromium"],
+            check=True,
+            capture_output=True,
+            timeout=300,
+        )
+    except Exception as e:
+        # Don't crash the dashboard — the SSPs that need a browser will fail
+        # with a clearer error of their own.
+        print(f"Warning: could not install Playwright Chromium: {e}")
+
+
+_ensure_chromium_installed()
 
 st.set_page_config(
     page_title="SSP Revenue Reports",
