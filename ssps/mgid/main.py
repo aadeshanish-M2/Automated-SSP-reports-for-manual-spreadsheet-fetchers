@@ -195,6 +195,7 @@ def process_rows(rows: list[dict]) -> pd.DataFrame:
     # MGID's thisMonth preset already returns MTD, but defensively re-filter
     # in case the preset behaviour ever shifts.
     first_of_month = pd.Timestamp(datetime.now().replace(day=1).date())
+    _pre_mtd_df = df.copy()
     before = len(df)
     df = df[df["__date"] >= first_of_month]
     if before != len(df):

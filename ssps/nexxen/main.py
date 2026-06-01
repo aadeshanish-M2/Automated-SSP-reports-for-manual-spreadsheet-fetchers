@@ -234,11 +234,13 @@ def process_df(df: pd.DataFrame) -> pd.DataFrame:
 
     # Filter to month-to-date (1st of current month → today).
     first_of_month = pd.Timestamp(datetime.now().replace(day=1).date())
+    _pre_mtd_df = df.copy()
     before = len(df)
     df = df[df["__date"] >= first_of_month]
     log(f"Filtered to MTD ({first_of_month.date()} onward): kept {len(df)}, dropped {before - len(df)}.")
     if df.empty:
-        sys.exit("ERROR: No rows in current month — aborting to protect the sheet.")
+        log("WARNING: 0 rows match current-month filter — falling back to full report (likely a month-boundary day, MTD data not available yet).")
+        df = _pre_mtd_df
 
     out = pd.DataFrame({
         "Date":            df["__date"].dt.strftime("%Y-%m-%d"),

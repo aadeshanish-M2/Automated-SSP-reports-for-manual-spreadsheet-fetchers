@@ -175,6 +175,7 @@ def process_points(points: list[dict]) -> pd.DataFrame:
 
     # Defensive MTD filter (the API preset is already "thismonth").
     first_of_month = pd.Timestamp(datetime.now().replace(day=1).date())
+    _pre_mtd_df = df.copy()
     before = len(df)
     df = df[df["__date"] >= first_of_month]
     if before != len(df):
