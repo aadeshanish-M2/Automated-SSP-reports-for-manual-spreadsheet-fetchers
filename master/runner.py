@@ -30,6 +30,7 @@ SSPS = [
     ("Connatix",   SSPS_DIR / "connatix"),
     ("Insticator", SSPS_DIR / "insticator"),
     ("Vidoomy",    SSPS_DIR / "vidoomy"),
+    ("Gliacloud",  SSPS_DIR / "gliacloud"),
 ]
 
 HISTORY_PATH    = HERE / "history.json"
