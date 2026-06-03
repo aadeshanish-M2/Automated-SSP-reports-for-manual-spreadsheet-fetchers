@@ -45,6 +45,51 @@ MAX_ALLOWED_AGE_DAYS = 5
 HEADER = ["Domain", "Date", "Revenue", "Impression", "CPM"]
 
 
+def _normalize_and_aggregate(rows):
+    """
+    Collapse URL / subdomain Domain values to their root domain, then sum
+    Impression + Revenue across same (Domain, Date) groups. CPM is recomputed
+    from totals (Revenue/Impression * 1000) — averaging CPMs would be wrong.
+    """
+    from urllib.parse import urlparse
+
+    def root(s):
+        s = str(s).strip()
+        if "://" in s:
+            try:
+                s = urlparse(s).netloc or s
+            except Exception:
+                pass
+        s = s.lower().split("/")[0].split(":")[0]
+        if s.startswith("www."):
+            s = s[4:]
+        return s
+
+    bucket = {}
+    for r in rows:
+        domain = root(r[0])
+        date   = str(r[1]).strip()
+        try:
+            rev = float(str(r[2]).lstrip("$").replace(",", ""))
+        except Exception:
+            rev = 0.0
+        try:
+            imp = int(float(str(r[3])))
+        except Exception:
+            imp = 0
+        k = (domain, date)
+        if k in bucket:
+            bucket[k]["rev"] += rev
+            bucket[k]["imp"] += imp
+        else:
+            bucket[k] = {"rev": rev, "imp": imp}
+
+    new_rows = []
+    for (domain, date), v in bucket.items():
+        cpm = round(v["rev"] / v["imp"] * 1000, 4) if v["imp"] > 0 else 0.0
+        new_rows.append([domain, date, f"${v['rev']:.2f}", v["imp"], cpm])
+    return new_rows
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def log(msg: str) -> None:
@@ -354,6 +399,7 @@ def write_sheet(df: pd.DataFrame, creds) -> None:
         ]
         for _, r in df.iterrows()
     ]
+    rows = _normalize_and_aggregate(rows)
     rows.sort(key=lambda r: (r[0], r[1]))
     rows.sort(key=lambda r: r[0], reverse=True)
 
