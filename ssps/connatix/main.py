@@ -168,60 +168,67 @@ def download_connatix_csv(username: str, password: str) -> Path:
             browser.close()
             sys.exit(f"ERROR: Could not open the {REPORT_NAME} report.\nDetail: {e}")
 
-        # Connatix disables Refresh when the report was refreshed very recently.
-        # If enabled → trigger a refresh, wait for the report list to show
-        # Completed, then re-open. If disabled → skip and use the existing
-        # data (which is fresh enough).
-        refresh_btn = page.locator('button:has-text("Refresh")').first
-        try:
-            is_disabled = refresh_btn.is_disabled(timeout=5_000)
-        except Exception:
-            is_disabled = True
-
-        if is_disabled:
-            log("Refresh button is disabled (report was refreshed very recently) — "
-                "using the existing data.")
-        else:
-            log("Triggering Refresh…")
-            refresh_btn.click()
-            page.wait_for_timeout(3000)
-
-            log("Waiting for refresh to complete (can take a few minutes)…")
-            completed_re = re.compile(r"(completed|success|done|ready)", re.I)
-            pending_re   = re.compile(r"(pending|processing|running|queued)", re.I)
-            import time
-            start = time.time()
-            poll_timeout_s = 900   # 15 minutes
-            poll_every_s   = 15
-            last_status = ""
-            while time.time() - start < poll_timeout_s:
-                try:
-                    row = page.locator(
-                        f'tr:has-text("{REPORT_NAME}"), '
-                        f'[role="row"]:has-text("{REPORT_NAME}")'
-                    ).first
-                    row_text = row.inner_text(timeout=5_000)
-                except Exception:
-                    row_text = ""
-                if completed_re.search(row_text) and not pending_re.search(row_text):
-                    log("  → status: Completed.")
-                    break
-                if row_text != last_status:
-                    snippet = " ".join(row_text.split())[:80]
-                    log(f"  status: {snippet}")
-                    last_status = row_text
-                page.wait_for_timeout(poll_every_s * 1000)
-            else:
-                browser.close()
-                sys.exit("ERROR: Report did not reach Completed status in 15 minutes.")
-
-            log(f"Re-opening '{REPORT_NAME}' for download…")
+        # ALWAYS refresh — Connatix may disable the button if recently refreshed,
+        # but the data underneath could still be stale relative to today's MTD.
+        # Retry up to a few times if needed.
+        import time
+        log("Triggering Refresh…")
+        clicked = False
+        for attempt in range(1, 5):
             try:
-                page.locator(f':text("{REPORT_NAME}")').first.click()
-                page.wait_for_timeout(5000)
-            except PlaywrightTimeoutError as e:
-                browser.close()
-                sys.exit(f"ERROR: Could not re-open the report after refresh.\nDetail: {e}")
+                refresh_btn = page.locator('button:has-text("Refresh")').first
+                refresh_btn.click(force=True, timeout=10_000)
+                clicked = True
+                log(f"  → refresh click {attempt} sent.")
+                break
+            except Exception as e:
+                log(f"  attempt {attempt}: refresh click failed ({e!s:.80}); waiting 30s…")
+                page.wait_for_timeout(30_000)
+        if not clicked:
+            log("WARNING: Could not click Refresh after retries. Downloading whatever is shown.")
+
+        # Clicking Refresh navigates back to the report list. Poll the row's
+        # status until it leaves "pending" / "processing".
+        page.wait_for_timeout(4000)
+
+        log("Waiting for refresh to complete (can take a few minutes)…")
+        completed_re = re.compile(r"(completed|success|done|ready)", re.I)
+        pending_re   = re.compile(r"(pending|processing|running|queued|in\s*progress)", re.I)
+        start = time.time()
+        poll_timeout_s = 600   # 10 minutes
+        poll_every_s   = 15
+        last_status = ""
+        completed = False
+        while time.time() - start < poll_timeout_s:
+            try:
+                row = page.locator(
+                    f'tr:has-text("{REPORT_NAME}"), '
+                    f'[role="row"]:has-text("{REPORT_NAME}")'
+                ).first
+                row_text = row.inner_text(timeout=5_000)
+            except Exception:
+                row_text = ""
+            if completed_re.search(row_text) and not pending_re.search(row_text):
+                log("  → status: Completed.")
+                completed = True
+                break
+            if row_text != last_status:
+                snippet = " ".join(row_text.split())[:80]
+                log(f"  status: {snippet}")
+                last_status = row_text
+            page.wait_for_timeout(poll_every_s * 1000)
+
+        if not completed:
+            log("WARNING: Report didn't reach Completed within 10 min. Proceeding "
+                "with whatever's available — sheet may be stale this run.")
+
+        log(f"Re-opening '{REPORT_NAME}' for download…")
+        try:
+            page.locator(f':text("{REPORT_NAME}")').first.click()
+            page.wait_for_timeout(5000)
+        except PlaywrightTimeoutError as e:
+            browser.close()
+            sys.exit(f"ERROR: Could not re-open the report after refresh.\nDetail: {e}")
 
         log("Triggering CSV download…")
         try:
