@@ -56,7 +56,7 @@ MAX_ALLOWED_AGE_DAYS = 5      # abort if newest date in CSV older than this
 DOWNLOAD_TIMEOUT_S   = 600    # give the report up to 10 min to land in S3
 DOWNLOAD_POLL_S      = 20     # poll the download endpoint every N seconds
 
-HEADER = ["Date", "Site/App Bundle", "Impressions", "Revenue", "eCPM"]
+HEADER = ["Domain", "Date", "Revenue", "Impression", "CPM"]
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -265,7 +265,13 @@ def upsert_to_sheet(df: pd.DataFrame, creds) -> None:
     service = build("sheets", "v4", credentials=creds, cache_discovery=False)
 
     rows = [
-        [r["Date"], r["Site/App Bundle"], r["Impressions"], r["Revenue"], r["eCPM"]]
+        [
+            str(r["Site/App Bundle"]).strip(),
+            str(r["Date"]).strip(),
+            f"${float(pd.to_numeric(r['Revenue'], errors='coerce') or 0):.2f}",
+            int(pd.to_numeric(r["Impressions"], errors="coerce") or 0),
+            float(pd.to_numeric(r["eCPM"], errors="coerce") or 0),
+        ]
         for _, r in df.iterrows()
     ]
     rows.sort(key=lambda r: (r[0], r[1]))     # Date asc, Site asc

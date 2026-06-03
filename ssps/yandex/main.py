@@ -37,7 +37,7 @@ REV_FIELD      = "partner_wo_nds"
 ECPM_FIELD     = "ecpm_partner_wo_nds"
 
 MAX_ALLOWED_AGE_DAYS = 5
-HEADER = ["Date", "Domain", "Impressions", "Revenue", "eCPM"]
+HEADER = ["Domain", "Date", "Revenue", "Impression", "CPM"]
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -205,7 +205,13 @@ def write_sheet(df: pd.DataFrame, creds) -> None:
     service = build("sheets", "v4", credentials=creds, cache_discovery=False)
 
     rows = [
-        [r["Date"], r["Domain"], r["Impressions"], r["Revenue"], r["eCPM"]]
+        [
+            str(r["Domain"]).strip(),
+            str(r["Date"]).strip(),
+            f"${float(pd.to_numeric(r['Revenue'], errors='coerce') or 0):.2f}",
+            int(pd.to_numeric(r["Impressions"], errors="coerce") or 0),
+            float(pd.to_numeric(r["eCPM"], errors="coerce") or 0),
+        ]
         for _, r in df.iterrows()
     ]
     rows.sort(key=lambda r: (r[0], r[1]))

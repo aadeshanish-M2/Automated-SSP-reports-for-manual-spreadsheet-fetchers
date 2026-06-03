@@ -254,7 +254,7 @@ def process_csv(csv_path: Path) -> pd.DataFrame:
 
 # ── Step 3 — Upsert into Google Sheets ───────────────────────────────────────
 
-HEADER = ["Domain", "Date", "Impressions", "Revenue", "CPM"]
+HEADER = ["Domain", "Date", "Revenue", "Impression", "CPM"]
 
 
 def get_sheet_service(creds):
@@ -296,7 +296,13 @@ def upsert_to_sheet(df: pd.DataFrame, creds) -> None:
 
     # Build rows from the (already MTD-filtered) df, sorted newest first then by Domain.
     rows = [
-        [r["Domain"], r["Date"], r["Impressions"], r["Revenue"], r["CPM"]]
+        [
+            str(r["Domain"]).strip(),
+            str(r["Date"]).strip(),
+            f"${float(pd.to_numeric(r['Revenue'], errors='coerce') or 0):.2f}",
+            int(pd.to_numeric(r["Impressions"], errors="coerce") or 0),
+            float(pd.to_numeric(r["CPM"], errors="coerce") or 0),
+        ]
         for _, r in df.iterrows()
     ]
     rows.sort(key=lambda r: (r[1], r[0]))     # Date asc, Domain asc
