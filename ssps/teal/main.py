@@ -35,11 +35,22 @@ MAX_ALLOWED_AGE_DAYS = 5            # abort if newest row in CSV is older than t
 
 def _normalize_and_aggregate(rows):
     """
-    Collapse URL / subdomain Domain values to their root domain, then sum
-    Impression + Revenue across same (Domain, Date) groups. CPM is recomputed
+    Collapse URL paths AND subdomains in Domain values to their registered
+    root domain (e.g. https://abc.jugantor.com/sports → jugantor.com), then
+    sum Impression + Revenue across same (Domain, Date) groups. CPM recomputed
     from totals (Revenue/Impression * 1000) — averaging CPMs would be wrong.
+
+    Uses the Public Suffix List via tldextract so multi-part TLDs like
+    .co.uk, .com.br, .gov.in resolve correctly.
     """
     from urllib.parse import urlparse
+    try:
+        import tldextract
+        # suffix_list_urls=() forces use of bundled PSL snapshot only — no
+        # network call on first run, important for stateless cloud containers.
+        _extract = tldextract.TLDExtract(suffix_list_urls=(), cache_dir=False)
+    except ImportError:
+        _extract = None
 
     def root(s):
         s = str(s).strip()
@@ -49,6 +60,13 @@ def _normalize_and_aggregate(rows):
             except Exception:
                 pass
         s = s.lower().split("/")[0].split(":")[0]
+        if not s:
+            return ""
+        if _extract is not None:
+            ext = _extract(s)
+            if ext.domain and ext.suffix:
+                return f"{ext.domain}.{ext.suffix}"
+        # Fallback: strip only "www."
         if s.startswith("www."):
             s = s[4:]
         return s
