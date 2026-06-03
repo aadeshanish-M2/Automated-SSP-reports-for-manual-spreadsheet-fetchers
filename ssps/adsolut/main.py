@@ -347,7 +347,7 @@ def write_sheet(df: pd.DataFrame, creds) -> None:
             str(r["Date"]).strip(),
             f"${float(pd.to_numeric(r['Revenue'], errors='coerce') or 0):.2f}",
             int(pd.to_numeric(r["Impressions"], errors="coerce") or 0),
-            float(pd.to_numeric(r["eCPM"], errors="coerce") or 0),
+            float(pd.to_numeric(r["Gross CPM"], errors="coerce") or 0),
         ]
         for _, r in df.iterrows()
     ]
