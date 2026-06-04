@@ -372,8 +372,54 @@ def upsert_to_sheet(df: pd.DataFrame, creds) -> None:
     rows.sort(key=lambda r: (r[1], r[0]))     # Date asc, Domain asc
     rows.sort(key=lambda r: r[1], reverse=True)  # then Date desc (stable)
 
-    final_rows = [HEADER] + rows
-    log(f"Writing {len(rows)} MTD rows to sheet (replacing existing)…")
+    # Preserve previous-month rows; only the current month gets refreshed.
+
+
+    existing = service.spreadsheets().values().get(
+
+
+        spreadsheetId=SPREADSHEET_ID, range=SHEET_NAME,
+
+
+    ).execute().get("values", [])
+
+
+    current_month = datetime.now().strftime("%Y-%m")
+
+
+    preserved = []
+
+
+    for _r in existing:
+
+
+        if not _r or _r == HEADER:
+
+
+            continue
+
+
+        if len(_r) >= 2 and str(_r[1]).strip().startswith(current_month):
+
+
+            continue  # current-month row → will be replaced by fresh data
+
+
+        preserved.append(_r)
+
+
+    merged = rows + preserved
+
+
+    merged.sort(key=lambda r: (str(r[1]) if len(r) > 1 else "", str(r[0]) if len(r) > 0 else ""))
+
+
+    merged.sort(key=lambda r: str(r[1]) if len(r) > 1 else "", reverse=True)
+
+
+
+    final_rows = [HEADER] + merged
+    log(f"Writing {len(merged)} rows = {len(rows)} new MTD + {len(preserved)} preserved (history)…")
     clear_sheet(service, SPREADSHEET_ID, SHEET_NAME)
     write_sheet(service, SPREADSHEET_ID, SHEET_NAME, final_rows)
     log("Sheet updated successfully.")
