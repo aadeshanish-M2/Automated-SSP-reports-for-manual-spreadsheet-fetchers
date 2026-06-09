@@ -27,10 +27,12 @@ SSPS = [
     ("Kuantyx",    SSPS_DIR / "kuantyx"),
     ("Adsolut",    SSPS_DIR / "adsolut"),
     ("Yandex",     SSPS_DIR / "yandex"),
-    ("Connatix",   SSPS_DIR / "connatix"),
     ("Insticator", SSPS_DIR / "insticator"),
     ("Vidoomy",    SSPS_DIR / "vidoomy"),
     ("Gliacloud",  SSPS_DIR / "gliacloud"),
+    # Connatix runs last because its refresh can take 10-20 min and we'd rather
+    # not block the fast ones behind it.
+    ("Connatix",   SSPS_DIR / "connatix"),
 ]
 
 HISTORY_PATH    = HERE / "history.json"
