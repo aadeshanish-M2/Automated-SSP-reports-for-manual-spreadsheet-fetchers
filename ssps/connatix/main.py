@@ -250,12 +250,11 @@ def download_connatix_csv(username: str, password: str) -> Path:
         if not clicked:
             log("WARNING: Could not click Refresh after retries. Downloading whatever is shown.")
 
-        # Connatix's UI refreshes in ~15s based on manual observation; the
-        # status-polling we used to do was getting stuck because the page
-        # doesn't always navigate back to the list. Just sleep a fixed
-        # 30s instead — fast and reliable.
-        log("Waiting 30s for refresh to complete…")
-        page.wait_for_timeout(30_000)
+        # Polling was getting stuck because the page doesn't always navigate
+        # back to the list after Refresh. Just sleep a fixed 5 minutes — well
+        # above any observed completion time for safety.
+        log("Waiting 5 minutes for refresh to complete…")
+        page.wait_for_timeout(300_000)
 
         log(f"Re-opening '{REPORT_NAME}' for download…")
         try:
