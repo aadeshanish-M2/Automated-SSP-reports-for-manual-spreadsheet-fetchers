@@ -250,43 +250,19 @@ def download_connatix_csv(username: str, password: str) -> Path:
         if not clicked:
             log("WARNING: Could not click Refresh after retries. Downloading whatever is shown.")
 
-        # Clicking Refresh navigates back to the report list. Poll the row's
-        # status until it leaves "pending" / "processing".
-        page.wait_for_timeout(4000)
-
-        log("Waiting for refresh to complete (can take a few minutes)…")
-        completed_re = re.compile(r"(completed|success|done|ready)", re.I)
-        pending_re   = re.compile(r"(pending|processing|running|queued|in\s*progress)", re.I)
-        start = time.time()
-        poll_timeout_s = 1200  # 20 minutes (Connatix can be very slow)
-        poll_every_s   = 15
-        last_status = ""
-        completed = False
-        while time.time() - start < poll_timeout_s:
-            try:
-                row = page.locator(
-                    f'tr:has-text("{REPORT_NAME}"), '
-                    f'[role="row"]:has-text("{REPORT_NAME}")'
-                ).first
-                row_text = row.inner_text(timeout=5_000)
-            except Exception:
-                row_text = ""
-            if completed_re.search(row_text) and not pending_re.search(row_text):
-                log("  → status: Completed.")
-                completed = True
-                break
-            if row_text != last_status:
-                snippet = " ".join(row_text.split())[:80]
-                log(f"  status: {snippet}")
-                last_status = row_text
-            page.wait_for_timeout(poll_every_s * 1000)
-
-        if not completed:
-            log("WARNING: Report didn't reach Completed within 10 min. Proceeding "
-                "with whatever's available — sheet may be stale this run.")
+        # Connatix's UI refreshes in ~15s based on manual observation; the
+        # status-polling we used to do was getting stuck because the page
+        # doesn't always navigate back to the list. Just sleep a fixed
+        # 30s instead — fast and reliable.
+        log("Waiting 30s for refresh to complete…")
+        page.wait_for_timeout(30_000)
 
         log(f"Re-opening '{REPORT_NAME}' for download…")
         try:
+            # Navigate back to the reports list first, in case Refresh kept us on
+            # the report detail page.
+            page.goto(REPORTS_URL, wait_until="domcontentloaded")
+            page.wait_for_timeout(3000)
             page.locator(f':text("{REPORT_NAME}")').first.click()
             page.wait_for_timeout(5000)
         except PlaywrightTimeoutError as e:
