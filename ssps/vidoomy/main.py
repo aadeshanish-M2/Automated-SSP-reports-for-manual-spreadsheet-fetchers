@@ -387,6 +387,16 @@ def write_sheet(df: pd.DataFrame, creds) -> None:
     log("Connecting to Google Sheets…")
     service = build("sheets", "v4", credentials=creds, cache_discovery=False)
 
+
+    # Auto-detect the first tab name (sheet might not be called "Sheet1").
+    try:
+        _meta = service.spreadsheets().get(
+            spreadsheetId=SPREADSHEET_ID, fields="sheets.properties.title"
+        ).execute()
+        _tab = _meta["sheets"][0]["properties"]["title"]
+    except Exception as _e:
+        _tab = SHEET_NAME
+    log(f"Using sheet tab: {_tab!r}")
     rows = [
         [
             str(r["Site"]).strip(),
@@ -407,7 +417,7 @@ def write_sheet(df: pd.DataFrame, creds) -> None:
     existing = service.spreadsheets().values().get(
 
 
-        spreadsheetId=SPREADSHEET_ID, range=SHEET_NAME,
+        spreadsheetId=SPREADSHEET_ID, range=_tab,
 
 
     ).execute().get("values", [])
@@ -459,11 +469,11 @@ def write_sheet(df: pd.DataFrame, creds) -> None:
     final_rows = [HEADER] + merged
     log(f"Writing {len(merged)} rows = {len(rows)} new MTD + {len(preserved)} preserved (history)…")
     service.spreadsheets().values().clear(
-        spreadsheetId=SPREADSHEET_ID, range=SHEET_NAME, body={},
+        spreadsheetId=SPREADSHEET_ID, range=_tab, body={},
     ).execute()
     service.spreadsheets().values().update(
         spreadsheetId=SPREADSHEET_ID,
-        range=f"{SHEET_NAME}!A1",
+        range=f"{_tab}!A1",
         valueInputOption="USER_ENTERED",
         body={"values": final_rows},
     ).execute()

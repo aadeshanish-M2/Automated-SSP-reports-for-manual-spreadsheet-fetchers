@@ -378,7 +378,7 @@ def upsert_to_sheet(df: pd.DataFrame, creds) -> None:
     existing = service.spreadsheets().values().get(
 
 
-        spreadsheetId=SPREADSHEET_ID, range=SHEET_NAME,
+        spreadsheetId=SPREADSHEET_ID, range=_tab,
 
 
     ).execute().get("values", [])
