@@ -357,6 +357,16 @@ def upsert_to_sheet(df: pd.DataFrame, creds) -> None:
     log("Connecting to Google Sheets…")
     service = get_sheet_service(creds)
 
+    # Auto-detect the first tab name (sheet might not be called "Sheet1").
+    try:
+        _meta = service.spreadsheets().get(
+            spreadsheetId=SPREADSHEET_ID, fields="sheets.properties.title"
+        ).execute()
+        _tab = _meta["sheets"][0]["properties"]["title"]
+    except Exception:
+        _tab = SHEET_NAME
+    log(f"Using sheet tab: {_tab!r}")
+
     # Build rows from the (already MTD-filtered) df, sorted newest first then by Domain.
     rows = [
         [
@@ -429,8 +439,8 @@ def upsert_to_sheet(df: pd.DataFrame, creds) -> None:
     merged = [[_stringify(c) for c in r] for r in merged]
     final_rows = [HEADER] + merged
     log(f"Writing {len(merged)} rows = {len(rows)} new MTD + {len(preserved)} preserved (history)…")
-    clear_sheet(service, SPREADSHEET_ID, SHEET_NAME)
-    write_sheet(service, SPREADSHEET_ID, SHEET_NAME, final_rows)
+    clear_sheet(service, SPREADSHEET_ID, _tab)
+    write_sheet(service, SPREADSHEET_ID, _tab, final_rows)
     log("Sheet updated successfully.")
 
 
