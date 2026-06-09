@@ -225,7 +225,7 @@ def download_connatix_csv(username: str, password: str) -> Path:
 
         log(f"Opening '{REPORT_NAME}' report…")
         try:
-            page.locator(f':text("{REPORT_NAME}")').first.click()
+            page.get_by_text(REPORT_NAME, exact=True).first.click()
             page.wait_for_timeout(5000)
         except PlaywrightTimeoutError as e:
             browser.close()
@@ -262,7 +262,7 @@ def download_connatix_csv(username: str, password: str) -> Path:
             # the report detail page.
             page.goto(REPORTS_URL, wait_until="domcontentloaded")
             page.wait_for_timeout(3000)
-            page.locator(f':text("{REPORT_NAME}")').first.click()
+            page.get_by_text(REPORT_NAME, exact=True).first.click()
             page.wait_for_timeout(5000)
         except PlaywrightTimeoutError as e:
             browser.close()
