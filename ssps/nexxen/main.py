@@ -387,6 +387,15 @@ def upsert_to_sheet(df: pd.DataFrame, creds) -> None:
 
 
 
+    def _stringify(cell):
+        if cell is None:
+            return ""
+        if isinstance(cell, (int, float)):
+            if isinstance(cell, float) and (cell != cell):  # NaN check
+                return ""
+            return cell
+        return str(cell)
+    merged = [[_stringify(c) for c in r] for r in merged]
     final_rows = [HEADER] + merged
     log(f"Writing {len(merged)} rows = {len(rows)} new MTD + {len(preserved)} preserved (history)…")
     service.spreadsheets().values().clear(
