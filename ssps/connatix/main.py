@@ -41,7 +41,7 @@ REV_COL_CANDIDATES  = ["Publisher Total Revenue ($)", "Revenue", "Net Revenue",
 ECPM_COL_CANDIDATES = ["CPM ($)", "eCPM", "ECPM", "Effective CPM", "CPM",
                        "Net eCPM", "Gross eCPM"]
 
-MAX_ALLOWED_AGE_DAYS = 5
+MAX_ALLOWED_AGE_DAYS = 10   # Connatix is slow; data lags 1-2 days even when fresh
 HEADER = ["Domain", "Date", "Revenue", "Impression", "CPM"]
 
 
@@ -258,7 +258,7 @@ def download_connatix_csv(username: str, password: str) -> Path:
         completed_re = re.compile(r"(completed|success|done|ready)", re.I)
         pending_re   = re.compile(r"(pending|processing|running|queued|in\s*progress)", re.I)
         start = time.time()
-        poll_timeout_s = 600   # 10 minutes
+        poll_timeout_s = 1200  # 20 minutes (Connatix can be very slow)
         poll_every_s   = 15
         last_status = ""
         completed = False
