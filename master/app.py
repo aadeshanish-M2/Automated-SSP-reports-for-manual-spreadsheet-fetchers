@@ -517,7 +517,11 @@ if ssps_to_run:
     else:
         summary_placeholder.error(f"{ok}/{total} succeeded — details below.")
 
-    with detail_placeholder.expander("Show full output", expanded=False):
+    # Render the output expander directly (the st.empty() placeholder approach
+    # was hiding it). Auto-open when there were any failures so the error is
+    # visible without needing to click anything.
+    any_failed = any(not r["ok"] for r in results)
+    with st.expander("Show full output", expanded=any_failed):
         for r in results:
             mark = "●" if r["ok"] else "●"
             color = "var(--matrix-green)" if r["ok"] else "var(--matrix-fail)"
