@@ -33,7 +33,9 @@ SCOPES         = ["https://www.googleapis.com/auth/spreadsheets"]
 API_BASE       = "https://api.mgid.com/v2/pub/account"
 DATE_INTERVAL  = "thisMonth"      # MGID preset = month-to-date
 DIMENSIONS     = "date,website"
-METRICS        = "revenue,pageViews,adCPM"
+# adCPC is needed to compute clicks = revenue / adCPC (MGID v2 doesn't expose
+# raw clicks). adCPM lets us populate the CPM column directly.
+METRICS        = "revenue,adCPC,adCPM"
 
 MAX_ALLOWED_AGE_DAYS = 5
 
@@ -223,13 +225,13 @@ def process_rows(rows: list[dict]) -> pd.DataFrame:
 
     date_col    = find_col("date", "day")
     website_col = find_col("website", "domain", "site")
-    impr_col    = find_col("pageViews", "impressions", "imps", "clicks")
     rev_col     = find_col("revenue", "earnings")
+    cpc_col     = find_col("adCPC", "cpc")
     cpm_col     = find_col("adCPM", "cpm", "eCPM")
 
     missing = [name for name, col in [
         ("date", date_col), ("website", website_col),
-        ("impressions", impr_col), ("revenue", rev_col),
+        ("revenue", rev_col), ("adCPC", cpc_col),
     ] if col is None]
     if missing:
         sys.exit(
@@ -265,18 +267,22 @@ def process_rows(rows: list[dict]) -> pd.DataFrame:
     if before != len(df):
         log(f"Filtered to MTD ({first_of_month.date()} onward): kept {len(df)}, dropped {before - len(df)}.")
 
-    impressions = pd.to_numeric(df[impr_col], errors="coerce").fillna(0)
-    revenue     = pd.to_numeric(df[rev_col],   errors="coerce").fillna(0)
+    revenue = pd.to_numeric(df[rev_col], errors="coerce").fillna(0)
+    cpc     = pd.to_numeric(df[cpc_col], errors="coerce").fillna(0)
+    # Compute clicks = revenue / adCPC (rounded), since MGID v2 doesn't expose
+    # a raw clicks metric. Where adCPC is 0 we can't infer clicks → use 0.
+    clicks  = (revenue.where(cpc > 0, 0) / cpc.where(cpc > 0, 1)).round().astype(int)
+
     if cpm_col is not None:
         cpm = pd.to_numeric(df[cpm_col], errors="coerce").fillna(0)
     else:
-        cpm = (revenue.where(impressions > 0, 0)
-               / impressions.where(impressions > 0, 1) * 1000)
+        cpm = (revenue.where(clicks > 0, 0)
+               / clicks.where(clicks > 0, 1) * 1000)
 
     out = pd.DataFrame({
         "Date":        df["__date"].dt.strftime("%Y-%m-%d"),
         "Website":     df[website_col].astype(str).str.strip(),
-        "Impressions": impressions.astype(int),
+        "Impressions": clicks,            # "Impression" column = derived clicks
         "Revenue":     revenue.round(4),
         "CPM":         cpm.round(4),
     })
