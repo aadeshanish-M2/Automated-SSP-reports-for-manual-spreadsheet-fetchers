@@ -33,7 +33,7 @@ SCOPES         = ["https://www.googleapis.com/auth/spreadsheets"]
 API_BASE       = "https://api.mgid.com/v2/pub/account"
 DATE_INTERVAL  = "thisMonth"      # MGID preset = month-to-date
 DIMENSIONS     = "date,website"
-METRICS        = "clicks,revenue"
+METRICS        = "revenue,pageViews,adCPM"
 
 MAX_ALLOWED_AGE_DAYS = 5
 
@@ -223,12 +223,13 @@ def process_rows(rows: list[dict]) -> pd.DataFrame:
 
     date_col    = find_col("date", "day")
     website_col = find_col("website", "domain", "site")
-    clicks_col  = find_col("clicks")
+    impr_col    = find_col("pageViews", "impressions", "imps", "clicks")
     rev_col     = find_col("revenue", "earnings")
+    cpm_col     = find_col("adCPM", "cpm", "eCPM")
 
     missing = [name for name, col in [
         ("date", date_col), ("website", website_col),
-        ("clicks", clicks_col), ("revenue", rev_col),
+        ("impressions", impr_col), ("revenue", rev_col),
     ] if col is None]
     if missing:
         sys.exit(
@@ -264,16 +265,20 @@ def process_rows(rows: list[dict]) -> pd.DataFrame:
     if before != len(df):
         log(f"Filtered to MTD ({first_of_month.date()} onward): kept {len(df)}, dropped {before - len(df)}.")
 
-    clicks  = pd.to_numeric(df[clicks_col], errors="coerce").fillna(0)
-    revenue = pd.to_numeric(df[rev_col],    errors="coerce").fillna(0)
+    impressions = pd.to_numeric(df[impr_col], errors="coerce").fillna(0)
+    revenue     = pd.to_numeric(df[rev_col],   errors="coerce").fillna(0)
+    if cpm_col is not None:
+        cpm = pd.to_numeric(df[cpm_col], errors="coerce").fillna(0)
+    else:
+        cpm = (revenue.where(impressions > 0, 0)
+               / impressions.where(impressions > 0, 1) * 1000)
 
     out = pd.DataFrame({
-        "Date":    df["__date"].dt.strftime("%Y-%m-%d"),
-        "Website": df[website_col].astype(str).str.strip(),
-        "Clicks":  clicks.astype(int),
-        "Revenue": revenue.round(4),
-        # CPM = Revenue / Clicks * 1000 (per spec); 0 when Clicks == 0.
-        "CPM":     (revenue.where(clicks > 0, 0) / clicks.where(clicks > 0, 1) * 1000).round(4),
+        "Date":        df["__date"].dt.strftime("%Y-%m-%d"),
+        "Website":     df[website_col].astype(str).str.strip(),
+        "Impressions": impressions.astype(int),
+        "Revenue":     revenue.round(4),
+        "CPM":         cpm.round(4),
     })
     out = out[~out["Website"].str.lower().isin(["", "nan", "none"])]
     if out.empty:
@@ -304,7 +309,7 @@ def write_sheet(df: pd.DataFrame, creds) -> None:
             str(r["Website"]).strip(),
             str(r["Date"]).strip(),
             f"${float(pd.to_numeric(r['Revenue'], errors='coerce') or 0):.2f}",
-            int(pd.to_numeric(r["Clicks"], errors="coerce") or 0),
+            int(pd.to_numeric(r["Impressions"], errors="coerce") or 0),
             float(pd.to_numeric(r["CPM"], errors="coerce") or 0),
         ]
         for _, r in df.iterrows()
