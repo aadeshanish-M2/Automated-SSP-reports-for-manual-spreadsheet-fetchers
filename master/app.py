@@ -371,6 +371,128 @@ st.markdown(
         font-weight: 700;
         text-shadow: 0 0 8px rgba(255, 0, 60, 0.7);
       }
+
+      /* ═══════════════ CRT / AMBIENT POLISH ═══════════════ */
+
+      /* Faint static scanlines over everything — classic phosphor monitor */
+      .stApp::before {
+        content: "";
+        position: fixed;
+        inset: 0;
+        pointer-events: none;
+        z-index: 9998;
+        background: repeating-linear-gradient(
+          0deg,
+          rgba(0, 0, 0, 0.09) 0px,
+          rgba(0, 0, 0, 0.09) 1px,
+          transparent 1px,
+          transparent 3px
+        );
+      }
+
+      /* Slow sweeping scan band drifting down the screen */
+      .stApp::after {
+        content: "";
+        position: fixed;
+        left: 0; right: 0;
+        top: 0;
+        height: 90px;
+        pointer-events: none;
+        z-index: 9997;
+        background: linear-gradient(
+          180deg,
+          transparent,
+          rgba(0, 255, 65, 0.03),
+          transparent
+        );
+        animation: scanband 10s linear infinite;
+      }
+      @keyframes scanband {
+        from { transform: translateY(-90px); }
+        to   { transform: translateY(100vh); }
+      }
+
+      /* CRT power-on flicker for the title (plays once per render) */
+      @keyframes crt-on {
+        0%   { opacity: 0; }
+        12%  { opacity: 0.7; }
+        22%  { opacity: 0.25; }
+        38%  { opacity: 1; }
+        48%  { opacity: 0.6; }
+        62%  { opacity: 1; }
+        100% { opacity: 1; }
+      }
+      h1 { animation: crt-on 0.8s ease-out 1; }
+
+      /* Boot-up fade for the main panel */
+      @keyframes bootfade {
+        from { opacity: 0; transform: translateY(8px); }
+        to   { opacity: 1; transform: translateY(0); }
+      }
+      .block-container { animation: bootfade 0.45s ease-out 1; }
+
+      /* Breathing glow on the primary Run All button */
+      @keyframes breathe {
+        0%, 100% {
+          box-shadow: 0 0 8px var(--matrix-glow),
+                      inset 0 0 6px rgba(0, 255, 65, 0.15);
+        }
+        50% {
+          box-shadow: 0 0 20px var(--matrix-glow),
+                      inset 0 0 12px rgba(0, 255, 65, 0.28);
+        }
+      }
+      .stButton > button[kind="primary"] {
+        animation: breathe 3s ease-in-out infinite;
+      }
+
+      /* SSP rows — green edge sweep on hover */
+      [data-testid="stHorizontalBlock"] {
+        border-left: 2px solid transparent;
+        padding-left: 6px;
+        transition: background 0.2s ease, border-color 0.2s ease,
+                    box-shadow 0.2s ease;
+      }
+      [data-testid="stHorizontalBlock"]:hover {
+        background: linear-gradient(90deg, rgba(0, 255, 65, 0.06), transparent 70%);
+        border-left-color: var(--matrix-green);
+        box-shadow: inset 10px 0 14px -10px var(--matrix-glow);
+      }
+
+      /* Dividers — slow marching dashes (period matches the 14px gradient) */
+      @keyframes dashmarch { to { background-position: 14px 0; } }
+      hr { animation: dashmarch 1.8s linear infinite; }
+
+      /* History rows — nudge + tint on hover */
+      .mx-histrow {
+        transition: background 0.15s ease, padding-left 0.15s ease;
+      }
+      .mx-histrow:hover {
+        background: rgba(0, 255, 65, 0.05);
+        padding-left: 8px !important;
+      }
+
+      /* Header image — phosphor frame */
+      [data-testid="stImage"] img {
+        border: 1px solid rgba(0, 255, 65, 0.25);
+        box-shadow: 0 0 28px rgba(0, 255, 65, 0.12);
+      }
+
+      /* Expander — glow on hover */
+      [data-testid="stExpander"]:hover {
+        border-color: var(--matrix-green) !important;
+        box-shadow: 0 0 12px rgba(0, 255, 65, 0.15);
+      }
+
+      /* Accessibility: kill all motion for users who asked for it */
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after {
+          animation-duration: 0.01ms !important;
+          animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important;
+        }
+        .matrix-bg { display: none; }
+      }
     </style>
     """,
     unsafe_allow_html=True,
@@ -560,7 +682,8 @@ else:
             )
         per_ssp = "  ".join(per_ssp_parts)
         st.markdown(
-            f"<div style='padding:0.4rem 0; border-bottom:1px dashed rgba(0,255,65,0.12); "
+            f"<div class='mx-histrow' style='padding:0.4rem 0; "
+            f"border-bottom:1px dashed rgba(0,255,65,0.12); "
             f"font-family:Courier New,monospace;'>"
             f"<span style='color:var(--matrix-dim); font-size:0.85em;'>{ts}</span>  "
             f"{per_ssp}  "
