@@ -7,3 +7,4 @@ google-auth-httplib2>=0.2
 google-api-python-client>=2.100
 playwright==1.52
 tldextract>=5.1
+openpyxl>=3.1
