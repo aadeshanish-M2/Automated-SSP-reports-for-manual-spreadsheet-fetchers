@@ -30,6 +30,7 @@ SSPS = [
     ("Insticator", SSPS_DIR / "insticator"),
     ("Vidoomy",    SSPS_DIR / "vidoomy"),
     ("NoBid",      SSPS_DIR / "nobid"),
+    ("RichAudience", SSPS_DIR / "richaudience"),
     # Connatix runs last because its refresh can take 5+ min and we'd rather
     # not block the fast ones behind it.
     ("Connatix",   SSPS_DIR / "connatix"),
