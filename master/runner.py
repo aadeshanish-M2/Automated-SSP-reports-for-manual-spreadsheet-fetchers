@@ -33,6 +33,7 @@ SSPS = [
     ("RichAudience", SSPS_DIR / "richaudience"),
     ("MediaFuse",  SSPS_DIR / "mediafuse"),
     ("Ogury",      SSPS_DIR / "ogury"),
+    ("OptiDigital", SSPS_DIR / "optidigital"),
     # Connatix runs last because its refresh can take 5+ min and we'd rather
     # not block the fast ones behind it.
     ("Connatix",   SSPS_DIR / "connatix"),
