@@ -204,15 +204,32 @@ def download_ogury_csv(username: str, password: str) -> Path:
 
         log("Opening Exclusive Demand → Report…")
         page.goto(REPORT_URL, wait_until="domcontentloaded")
+        page.wait_for_timeout(5000)
+
+        def _diagnostics(label: str):
+            """Print what the page actually shows so we can debug cloud-only failures."""
+            try:
+                log(f"  [diag] {label} url={page.url}")
+                body = page.locator("body").inner_text(timeout=5000)
+                snippet = " ".join(body.split())[:500]
+                log(f"  [diag] body text: {snippet!r}")
+                log(f"  [diag] icon count: i.oi-x36-cal={page.locator('i.oi-x36-cal').count()} "
+                    f"export={page.locator('i.oi-x24-export').count()} "
+                    f"inputs={page.locator('input').count()}")
+            except Exception as _e:
+                log(f"  [diag] could not capture page state: {_e}")
 
         log("Setting date range = This month…")
         try:
             # Wait until the report has actually rendered. The calendar icon
             # <i.oi-x36-cal> mounts inside the date-range button. Icon-font
             # glyphs don't register as "visible" to Playwright, so we wait for
-            # it to be ATTACHED to the DOM (up to 90s — cloud can be slow), then
-            # JS-click it directly (bypasses the visibility/actionability check).
-            page.wait_for_selector('i.oi-x36-cal', state="attached", timeout=90_000)
+            # it to be ATTACHED to the DOM, then JS-click it directly.
+            try:
+                page.wait_for_selector('i.oi-x36-cal', state="attached", timeout=90_000)
+            except PlaywrightTimeoutError:
+                _diagnostics("calendar icon never appeared")
+                raise
             page.wait_for_timeout(2000)
             page.eval_on_selector(
                 'i.oi-x36-cal',
