@@ -226,47 +226,58 @@ def download_connatix_csv(username: str, password: str) -> Path:
         log(f"Opening '{REPORT_NAME}' report…")
         try:
             page.get_by_text(REPORT_NAME, exact=True).first.click()
-            page.wait_for_timeout(5000)
+            page.wait_for_timeout(6000)
         except PlaywrightTimeoutError as e:
             browser.close()
             sys.exit(f"ERROR: Could not open the {REPORT_NAME} report.\nDetail: {e}")
 
-        # ALWAYS refresh — Connatix may disable the button if recently refreshed,
-        # but the data underneath could still be stale relative to today's MTD.
-        # Retry up to a few times if needed.
-        import time
-        log("Triggering Refresh…")
-        clicked = False
-        for attempt in range(1, 5):
-            try:
-                refresh_btn = page.locator('button:has-text("Refresh")').first
-                refresh_btn.click(force=True, timeout=10_000)
-                clicked = True
-                log(f"  → refresh click {attempt} sent.")
-                break
-            except Exception as e:
-                log(f"  attempt {attempt}: refresh click failed ({e!s:.80}); waiting 30s…")
-                page.wait_for_timeout(30_000)
-        if not clicked:
-            log("WARNING: Could not click Refresh after retries. Downloading whatever is shown.")
-
-        # Polling was getting stuck because the page doesn't always navigate
-        # back to the list after Refresh. Just sleep a fixed 5 minutes — well
-        # above any observed completion time for safety.
-        log("Waiting 5 minutes for refresh to complete…")
-        page.wait_for_timeout(300_000)
-
-        log(f"Re-opening '{REPORT_NAME}' for download…")
+        # The "Refresh" button is disabled once the report hits its saved-version
+        # cap, so it can't be used to pull fresh data. Instead we open Edit and
+        # click "Save & Run" — that ALWAYS regenerates the report with the saved
+        # "Month To date" range re-evaluated as of today.
+        log("Opening Edit → Save & Run (regenerates with today's MTD)…")
         try:
-            # Navigate back to the reports list first, in case Refresh kept us on
-            # the report detail page.
-            page.goto(REPORTS_URL, wait_until="domcontentloaded")
-            page.wait_for_timeout(3000)
-            page.get_by_text(REPORT_NAME, exact=True).first.click()
-            page.wait_for_timeout(5000)
+            page.get_by_text("Edit", exact=True).first.click(timeout=15_000)
+            page.wait_for_timeout(6000)
+            page.get_by_text("Save & Run", exact=True).first.click(timeout=15_000)
         except PlaywrightTimeoutError as e:
             browser.close()
-            sys.exit(f"ERROR: Could not re-open the report after refresh.\nDetail: {e}")
+            sys.exit(f"ERROR: Could not Edit / Save & Run the report.\nDetail: {e}")
+
+        # Poll the reports list until MTD shows a fresh "Completed" with today's
+        # refresh timestamp, then proceed to download.
+        log("Waiting for report to regenerate (Completed today)…")
+        import time as _time
+        today_str = datetime.now().strftime("%b %d %Y")   # e.g. "Jun 15 2026"
+        start = _time.time()
+        ready = False
+        while _time.time() - start < 600:   # up to 10 min
+            try:
+                page.goto(REPORTS_URL, wait_until="domcontentloaded")
+                page.wait_for_timeout(4000)
+                row = page.locator(
+                    f'tr:has-text("{REPORT_NAME}"), [role="row"]:has-text("{REPORT_NAME}"), '
+                    f'li:has-text("{REPORT_NAME}")'
+                ).first
+                row_text = row.inner_text(timeout=5000)
+                if "Completed" in row_text and today_str in row_text:
+                    log("  → report Completed with today's date.")
+                    ready = True
+                    break
+            except Exception:
+                pass
+            page.wait_for_timeout(20000)
+        if not ready:
+            log("WARNING: report didn't confirm Completed-today within 10 min; "
+                "downloading whatever is current.")
+
+        log(f"Opening '{REPORT_NAME}' for download…")
+        try:
+            page.get_by_text(REPORT_NAME, exact=True).first.click()
+            page.wait_for_timeout(6000)
+        except PlaywrightTimeoutError as e:
+            browser.close()
+            sys.exit(f"ERROR: Could not open the report for download.\nDetail: {e}")
 
         log("Triggering CSV download…")
         try:
