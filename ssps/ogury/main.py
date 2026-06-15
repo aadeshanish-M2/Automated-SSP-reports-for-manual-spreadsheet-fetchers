@@ -188,7 +188,13 @@ def download_ogury_csv(username: str, password: str) -> Path:
             page.fill('input[name="email"]', username)
             page.fill('input[name="password"]', password)
             page.click('button:has-text("SIGN IN")')
-            page.wait_for_timeout(10_000)
+            # Wait for auth to actually complete — the URL leaves /login — instead
+            # of a fixed sleep (cloud login is slower than local).
+            try:
+                page.wait_for_url(lambda u: "login" not in u.lower(), timeout=45_000)
+            except PlaywrightTimeoutError:
+                pass
+            page.wait_for_timeout(5_000)
             if "login" in page.url.lower():
                 browser.close()
                 sys.exit("ERROR: Still on login page after submit — check credentials.")
@@ -198,21 +204,20 @@ def download_ogury_csv(username: str, password: str) -> Path:
 
         log("Opening Exclusive Demand → Report…")
         page.goto(REPORT_URL, wait_until="domcontentloaded")
-        page.wait_for_timeout(10_000)
 
         log("Setting date range = This month…")
         try:
-            # Wait for the report to actually render by watching for the
-            # date-range button (shows e.g. "7 Jun — 14 Jun 2026"). The icon-font
-            # <i> glyph inside it doesn't reliably register as "visible", so we
-            # anchor on the button's date text instead.
-            date_btn = page.locator(
-                "button:has-text('Jun'), button:has-text('Jul'), "
-                "button:has-text('2026'), button:has-text('2027')"
-            ).first
-            date_btn.wait_for(state="visible", timeout=60_000)
-            page.wait_for_timeout(1500)
-            date_btn.click(timeout=15_000)
+            # Wait until the report has actually rendered. The calendar icon
+            # <i.oi-x36-cal> mounts inside the date-range button. Icon-font
+            # glyphs don't register as "visible" to Playwright, so we wait for
+            # it to be ATTACHED to the DOM (up to 90s — cloud can be slow), then
+            # JS-click it directly (bypasses the visibility/actionability check).
+            page.wait_for_selector('i.oi-x36-cal', state="attached", timeout=90_000)
+            page.wait_for_timeout(2000)
+            page.eval_on_selector(
+                'i.oi-x36-cal',
+                "el => (el.closest('button') || el).click()",
+            )
             page.wait_for_timeout(2000)
             page.locator('a.btn-link:has-text("This month")').click(timeout=15_000)
             page.wait_for_timeout(1000)
