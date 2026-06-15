@@ -201,11 +201,23 @@ def download_richaudience_csv(username: str, password: str) -> Path:
         page.goto(REPORT_URL, wait_until="domcontentloaded")
         page.wait_for_timeout(8000)
 
+        # Dismiss any pnotify toast/alert popups that can overlay the controls
+        # and intercept clicks.
+        def _clear_toasts():
+            try:
+                page.evaluate(
+                    "document.querySelectorAll('.ui-pnotify').forEach(e => e.remove())"
+                )
+            except Exception:
+                pass
+
         log("Selecting date preset = Current month…")
         try:
-            page.locator('#date-range-selectized').click(timeout=15_000)
+            _clear_toasts()
+            # force=True bypasses any lingering transient overlay.
+            page.locator('#date-range-selectized').click(timeout=15_000, force=True)
             page.wait_for_timeout(1200)
-            page.locator('.selectize-dropdown [data-value="30"]').click(timeout=10_000)
+            page.locator('.selectize-dropdown [data-value="30"]').click(timeout=10_000, force=True)
             page.wait_for_timeout(1500)
         except PlaywrightTimeoutError as e:
             browser.close()
@@ -213,6 +225,7 @@ def download_richaudience_csv(username: str, password: str) -> Path:
 
         log("Adding dimensions: Site + Date…")
         try:
+            _clear_toasts()
             page.locator('button:has-text("DIMENSIONS")').click()
             page.wait_for_timeout(1500)
             page.get_by_text("Site", exact=True).first.click(timeout=10_000)

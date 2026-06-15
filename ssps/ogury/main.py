@@ -202,6 +202,10 @@ def download_ogury_csv(username: str, password: str) -> Path:
 
         log("Setting date range = This month…")
         try:
+            # The report is a heavy SPA — the calendar icon can take a while to
+            # mount. Wait for it explicitly (up to 60s) before clicking.
+            page.wait_for_selector('i.oi-x36-cal', timeout=60_000)
+            page.wait_for_timeout(1500)
             page.locator('i.oi-x36-cal').first.click(timeout=15_000)
             page.wait_for_timeout(2000)
             page.locator('a.btn-link:has-text("This month")').click(timeout=10_000)
