@@ -206,6 +206,30 @@ def download_ogury_csv(username: str, password: str) -> Path:
         page.goto(REPORT_URL, wait_until="domcontentloaded")
         page.wait_for_timeout(5000)
 
+        # Ogury's report SPA intermittently crashes on first load ("This part of
+        # the application crashed… Click here to reload the page"). Reload and
+        # retry until the calendar icon shows up (it renders fine on a retry).
+        for attempt in range(1, 6):
+            if page.locator('i.oi-x36-cal').count() > 0:
+                break
+            crashed = False
+            try:
+                crashed = "application crashed" in page.locator("body").inner_text(timeout=5000).lower()
+            except Exception:
+                pass
+            log(f"  report not ready (attempt {attempt}/5"
+                f"{', crashed' if crashed else ''}) — reloading…")
+            try:
+                # Prefer the in-app reload link if present, else hard reload.
+                link = page.get_by_text("Click here to reload", exact=False)
+                if link.count() > 0:
+                    link.first.click(timeout=5000)
+                else:
+                    page.goto(REPORT_URL, wait_until="domcontentloaded")
+            except Exception:
+                page.goto(REPORT_URL, wait_until="domcontentloaded")
+            page.wait_for_timeout(10000)
+
         def _diagnostics(label: str):
             """Print what the page actually shows so we can debug cloud-only failures."""
             try:
