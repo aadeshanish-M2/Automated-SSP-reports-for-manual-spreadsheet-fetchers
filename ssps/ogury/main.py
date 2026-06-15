@@ -2,14 +2,18 @@
 """
 Ogury (publishers.ogury.co) → Google Sheets daily sync.
 
-Logs in via Playwright, opens Exclusive Demand → Report, sets the date
-picker to the "This month" preset, exports the per-day-per-asset CSV, and
-syncs to the destination sheet in the uniform format (Domain | Date |
-Revenue | Impression | CPM). Previous-month history preserved.
+Ogury's report SPA crashes deterministically in headless/cloud Chromium
+("This part of the application crashed"), so this script never loads it.
+Instead it logs in (which works), captures the exclusive-demand Bearer token
++ org ID from the background API calls Ogury fires after login, then POSTs
+directly to the same /stats/csv export endpoint the UI uses — getting the
+per-day-per-asset CSV without rendering the broken report. Syncs to the
+destination sheet in the uniform format. Previous-month history preserved.
 """
 
 import json
 import os
+import re
 import sys
 import tempfile
 from datetime import date, datetime
@@ -181,6 +185,35 @@ def download_ogury_csv(username: str, password: str) -> Path:
         )
         page = context.new_page()
 
+        # The Ogury report SPA crashes deterministically in headless/cloud
+        # ("This part of the application crashed"), so we never load it. Instead
+        # we log in (which works), capture the Bearer token + org ID from the
+        # background API calls Ogury fires automatically after login, then POST
+        # directly to the same /stats/csv export endpoint the UI uses.
+        # Ogury issues different tokens per backend service. The /stats/csv
+        # export endpoint only accepts the token used on the exclusive-demand-*
+        # hosts, so we capture THAT one specifically (a generic forapps token
+        # gets a 401). We also grab any token as a fallback.
+        bearer = {"token": None, "ed_token": None}
+        org_id = {"id": None}
+
+        def on_req(req):
+            a = req.headers.get("authorization", "")
+            if a.startswith("Bearer"):
+                if not bearer["token"]:
+                    bearer["token"] = a
+                if "exclusive-demand" in req.url and not bearer["ed_token"]:
+                    bearer["ed_token"] = a
+            if not org_id["id"]:
+                m = re.search(
+                    r"organizations[/=]([0-9a-f-]{36})|/publishers/([0-9a-f-]{36})"
+                    r"|organizationId%5D=([0-9a-f-]{36})|organizationId=([0-9a-f-]{36})",
+                    req.url,
+                )
+                if m:
+                    org_id["id"] = next(g for g in m.groups() if g)
+        page.on("request", on_req)
+
         log("Navigating to Ogury login…")
         page.goto(LOGIN_URL, wait_until="domcontentloaded")
         page.wait_for_timeout(8000)
@@ -188,8 +221,6 @@ def download_ogury_csv(username: str, password: str) -> Path:
             page.fill('input[name="email"]', username)
             page.fill('input[name="password"]', password)
             page.click('button:has-text("SIGN IN")')
-            # Wait for auth to actually complete — the URL leaves /login — instead
-            # of a fixed sleep (cloud login is slower than local).
             try:
                 page.wait_for_url(lambda u: "login" not in u.lower(), timeout=45_000)
             except PlaywrightTimeoutError:
@@ -202,90 +233,65 @@ def download_ogury_csv(username: str, password: str) -> Path:
             browser.close()
             sys.exit(f"ERROR: Login failed (timeout).\nDetail: {e}")
 
-        log("Opening Exclusive Demand → Report…")
-        page.goto(REPORT_URL, wait_until="domcontentloaded")
-        page.wait_for_timeout(5000)
-
-        # Ogury's report SPA intermittently crashes on first load ("This part of
-        # the application crashed… Click here to reload the page"). Reload and
-        # retry until the calendar icon shows up (it renders fine on a retry).
-        for attempt in range(1, 6):
-            if page.locator('i.oi-x36-cal').count() > 0:
+        # Navigate to the report URL to trigger the exclusive-demand-api backend
+        # call (which fires even when the report SPA crashes), so we capture the
+        # exclusive-demand token that /stats/csv requires.
+        log("Capturing exclusive-demand auth token + org id…")
+        try:
+            page.goto(REPORT_URL, wait_until="domcontentloaded")
+        except Exception:
+            pass
+        for _ in range(30):
+            if bearer["ed_token"] and org_id["id"]:
                 break
-            crashed = False
-            try:
-                crashed = "application crashed" in page.locator("body").inner_text(timeout=5000).lower()
-            except Exception:
-                pass
-            log(f"  report not ready (attempt {attempt}/5"
-                f"{', crashed' if crashed else ''}) — reloading…")
-            try:
-                # Prefer the in-app reload link if present, else hard reload.
-                link = page.get_by_text("Click here to reload", exact=False)
-                if link.count() > 0:
-                    link.first.click(timeout=5000)
-                else:
-                    page.goto(REPORT_URL, wait_until="domcontentloaded")
-            except Exception:
-                page.goto(REPORT_URL, wait_until="domcontentloaded")
-            page.wait_for_timeout(10000)
-
-        def _diagnostics(label: str):
-            """Print what the page actually shows so we can debug cloud-only failures."""
-            try:
-                log(f"  [diag] {label} url={page.url}")
-                body = page.locator("body").inner_text(timeout=5000)
-                snippet = " ".join(body.split())[:500]
-                log(f"  [diag] body text: {snippet!r}")
-                log(f"  [diag] icon count: i.oi-x36-cal={page.locator('i.oi-x36-cal').count()} "
-                    f"export={page.locator('i.oi-x24-export').count()} "
-                    f"inputs={page.locator('input').count()}")
-            except Exception as _e:
-                log(f"  [diag] could not capture page state: {_e}")
-
-        log("Setting date range = This month…")
-        try:
-            # Wait until the report has actually rendered. The calendar icon
-            # <i.oi-x36-cal> mounts inside the date-range button. Icon-font
-            # glyphs don't register as "visible" to Playwright, so we wait for
-            # it to be ATTACHED to the DOM, then JS-click it directly.
-            try:
-                page.wait_for_selector('i.oi-x36-cal', state="attached", timeout=90_000)
-            except PlaywrightTimeoutError:
-                _diagnostics("calendar icon never appeared")
-                raise
-            page.wait_for_timeout(2000)
-            page.eval_on_selector(
-                'i.oi-x36-cal',
-                "el => (el.closest('button') || el).click()",
-            )
-            page.wait_for_timeout(2000)
-            page.locator('a.btn-link:has-text("This month")').click(timeout=15_000)
             page.wait_for_timeout(1000)
-            page.locator('span:has-text("Apply"), button:has-text("Apply")').first.click(timeout=10_000)
-            page.wait_for_timeout(8000)
-        except PlaywrightTimeoutError as e:
-            browser.close()
-            sys.exit(f"ERROR: Could not set This month date range.\nDetail: {e}")
 
-        log("Exporting CSV…")
-        try:
-            page.locator('button:has(i.oi-x24-export)').first.click(timeout=15_000)
-            page.wait_for_timeout(1500)
-            page.get_by_text("CSV (Comma Separated Values)").click(timeout=10_000)
-            page.wait_for_timeout(500)
-            with page.expect_download(timeout=60_000) as dl_info:
-                page.get_by_text("DOWNLOAD EXPORT", exact=False).click(timeout=10_000)
-            download = dl_info.value
-        except PlaywrightTimeoutError as e:
+        token = bearer["ed_token"] or bearer["token"]
+        if not token:
             browser.close()
-            sys.exit(f"ERROR: CSV export did not start in time.\nDetail: {e}")
+            sys.exit("ERROR: Could not capture Ogury auth token after login.")
+        if not org_id["id"]:
+            browser.close()
+            sys.exit("ERROR: Could not capture Ogury organization id after login.")
+        log(f"  token captured (exclusive-demand={'yes' if bearer['ed_token'] else 'fallback'}, "
+            f"org {org_id['id']}).")
 
-        tmp = Path(tempfile.mktemp(suffix=".csv"))
-        download.save_as(str(tmp))
+        # POST to the export API directly — same call the UI makes.
+        today = date.today()
+        first = date(today.year, today.month, 1)
+        log(f"Requesting stats CSV {first.isoformat()} → {today.isoformat()}…")
+        payload = {
+            "filters": {
+                "from": first.isoformat(),
+                "to": today.isoformat(),
+                "organizations": [org_id["id"]],
+            },
+            "orders": ["date", "asset"],
+            "date_group": "day",
+            "groups": ["date", "asset"],
+            "metrics": ["revenues", "impressions", "requests", "ecpm"],
+        }
+        resp = page.request.post(
+            "https://exclusive-demand-report-api.ogury.co/stats/csv",
+            data=json.dumps(payload),
+            headers={
+                "Authorization": token,
+                "Content-Type": "application/json",
+            },
+            timeout=60_000,
+        )
+        ok = resp.ok
+        status = resp.status
+        body = resp.text()   # read while the context is still alive
         browser.close()
 
-    log(f"CSV downloaded → {tmp}")
+    if not ok:
+        sys.exit(f"ERROR: stats/csv request failed ({status}): {body[:300]}")
+    csv_text = body
+
+    tmp = Path(tempfile.mktemp(suffix=".csv"))
+    tmp.write_text(csv_text)
+    log(f"CSV downloaded → {tmp} ({len(csv_text.splitlines()) - 1} data rows)")
     return tmp
 
 
