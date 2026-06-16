@@ -237,15 +237,23 @@ def download_kuantyx_csv(username: str, password: str) -> Path:
             log(f"WARNING: extra group-by select failed: {e}")
 
         try:
-            # Date range → "This Month"
-            page.locator(
-                'button:has-text("This Month"), '
-                'label:has-text("Date") ~ * :text("This Month"), '
-                'select:near(:text("Date range"))'
-            ).first.click()
-            page.wait_for_timeout(500)
-        except Exception as e:
-            log(f"WARNING: date-range selector failed: {e}")
+            # Date range is a Kartik/bootstrap daterangepicker. Open it by
+            # clicking the .kv-drp-dropdown, then pick the "This Month" preset
+            # by its data-range-key. This is a HARD error if it fails — a wrong
+            # default ("Last Month") silently pulled last month's data before.
+            page.locator('.kv-drp-dropdown').first.click(timeout=10_000)
+            page.wait_for_timeout(1000)
+            page.locator('li[data-range-key="This Month"]').first.click(timeout=10_000)
+            page.wait_for_timeout(800)
+            # Verify the selected range now reads This Month.
+            val = page.locator('.kv-drp-dropdown .range-name').first.inner_text(timeout=5000)
+            log(f"  date range set to: {val!r}")
+            if "this month" not in val.lower():
+                browser.close()
+                sys.exit(f"ERROR: date range did not switch to This Month (got {val!r}).")
+        except PlaywrightTimeoutError as e:
+            browser.close()
+            sys.exit(f"ERROR: Could not set date range to This Month.\nDetail: {e}")
 
         log("Clicking Generate…")
         try:
