@@ -8,3 +8,4 @@ google-api-python-client>=2.100
 playwright==1.52
 tldextract>=5.1
 openpyxl>=3.1
+truststore>=0.9

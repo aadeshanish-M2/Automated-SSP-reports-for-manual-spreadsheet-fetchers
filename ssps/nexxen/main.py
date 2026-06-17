@@ -21,6 +21,17 @@ from datetime import datetime
 from io import StringIO
 from pathlib import Path
 
+# Nexxen's API (ssp-api.nexxen.com) serves a Sectigo cert whose root isn't in
+# certifi's bundle, causing CERTIFICATE_VERIFY_FAILED. truststore makes Python
+# use the OS native trust store (which has the Sectigo root on both macOS and
+# the Debian-based Streamlit cloud), fixing the handshake without disabling
+# verification. Harmless no-op if truststore isn't installed.
+try:
+    import truststore
+    truststore.inject_into_ssl()
+except Exception:
+    pass
+
 import pandas as pd
 import requests
 from google.oauth2 import service_account
