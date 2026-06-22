@@ -41,7 +41,7 @@ REV_COL_CANDIDATES  = ["Publisher Total Revenue ($)", "Revenue", "Net Revenue",
 ECPM_COL_CANDIDATES = ["CPM ($)", "eCPM", "ECPM", "Effective CPM", "CPM",
                        "Net eCPM", "Gross eCPM"]
 
-MAX_ALLOWED_AGE_DAYS = 10   # Connatix is slow; data lags 1-2 days even when fresh
+MAX_ALLOWED_AGE_DAYS = 3    # Save & Run regenerates same-day data; >3d = stale/failed run
 HEADER = ["Domain", "Date", "Revenue", "Impression", "CPM"]
 
 
@@ -223,6 +223,20 @@ def download_connatix_csv(username: str, password: str) -> Path:
             browser.close()
             sys.exit(f"ERROR: Could not open Reporting.\nDetail: {e}")
 
+        # Capture the report's CURRENT "Completed …" timestamp before we trigger a
+        # regeneration. We poll until this string CHANGES — a far more reliable
+        # signal that a fresh version finished than matching today's date text.
+        def _mtd_row_text() -> str:
+            try:
+                return page.locator(
+                    'tr:has-text("MTD"), [role="row"]:has-text("MTD"), '
+                    'li:has-text("MTD")'
+                ).first.inner_text(timeout=5000)
+            except Exception:
+                return ""
+        prev_row_text = _mtd_row_text()
+        log(f"Current MTD version: {prev_row_text.strip()!r}")
+
         log(f"Opening '{REPORT_NAME}' report…")
         try:
             page.get_by_text(REPORT_NAME, exact=True).first.click()
@@ -233,43 +247,56 @@ def download_connatix_csv(username: str, password: str) -> Path:
 
         # The "Refresh" button is disabled once the report hits its saved-version
         # cap, so it can't be used to pull fresh data. Instead we open Edit and
-        # click "Save & Run" — that ALWAYS regenerates the report with the saved
+        # click "Save & Run" — that regenerates the report with the saved
         # "Month To date" range re-evaluated as of today.
+        #
+        # IMPORTANT: the Save & Run control is a <button><icon/>Save & Run</button>,
+        # so get_by_text(exact=True) matched the wrong node and silently no-op'd —
+        # the report never regenerated and we served week-old data. Target the
+        # button by ROLE so the click actually fires the GraphQL update+run.
         log("Opening Edit → Save & Run (regenerates with today's MTD)…")
         try:
             page.get_by_text("Edit", exact=True).first.click(timeout=15_000)
             page.wait_for_timeout(6000)
-            page.get_by_text("Save & Run", exact=True).first.click(timeout=15_000)
+            save_btn = page.get_by_role("button", name="Save & Run")
+            if save_btn.count() == 0:
+                # fallback: any clickable element containing the text
+                save_btn = page.locator(
+                    'button:has-text("Save & Run"), [role="button"]:has-text("Save & Run")'
+                )
+            save_btn.first.click(timeout=15_000)
+            page.wait_for_timeout(5000)
         except PlaywrightTimeoutError as e:
             browser.close()
             sys.exit(f"ERROR: Could not Edit / Save & Run the report.\nDetail: {e}")
 
-        # Poll the reports list until MTD shows a fresh "Completed" with today's
-        # refresh timestamp, then proceed to download.
-        log("Waiting for report to regenerate (Completed today)…")
+        # Poll the reports list until the MTD row's "Completed …" timestamp
+        # CHANGES from what it was before Save & Run — proof a fresh version
+        # finished generating. HARD FAIL on timeout: never silently download the
+        # previous (stale) version, which is exactly how data got stuck before.
+        log("Waiting for report to regenerate (Completed timestamp must change)…")
         import time as _time
-        today_str = datetime.now().strftime("%b %d %Y")   # e.g. "Jun 15 2026"
         start = _time.time()
         ready = False
-        while _time.time() - start < 600:   # up to 10 min
+        while _time.time() - start < 900:   # up to 15 min
+            page.wait_for_timeout(20000)
             try:
                 page.goto(REPORTS_URL, wait_until="domcontentloaded")
                 page.wait_for_timeout(4000)
-                row = page.locator(
-                    f'tr:has-text("{REPORT_NAME}"), [role="row"]:has-text("{REPORT_NAME}"), '
-                    f'li:has-text("{REPORT_NAME}")'
-                ).first
-                row_text = row.inner_text(timeout=5000)
-                if "Completed" in row_text and today_str in row_text:
-                    log("  → report Completed with today's date.")
+                row_text = _mtd_row_text()
+                if "Completed" in row_text and row_text.strip() != prev_row_text.strip():
+                    log(f"  → regenerated: {row_text.strip()!r}")
                     ready = True
                     break
             except Exception:
                 pass
-            page.wait_for_timeout(20000)
         if not ready:
-            log("WARNING: report didn't confirm Completed-today within 10 min; "
-                "downloading whatever is current.")
+            browser.close()
+            sys.exit(
+                "ERROR: MTD report did not finish regenerating within 15 min "
+                "(timestamp never changed). Aborting rather than writing stale "
+                "data to the sheet."
+            )
 
         log(f"Opening '{REPORT_NAME}' for download…")
         try:
