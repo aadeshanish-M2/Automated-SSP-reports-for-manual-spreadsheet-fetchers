@@ -42,7 +42,13 @@ IMPR_COL_CANDIDATES = ["Impressions", "impressions"]
 REV_COL_CANDIDATES  = ["Revenue", "revenue"]
 ECPM_COL_CANDIDATES = ["eCPM", "CPM", "ecpm"]
 
-MAX_ALLOWED_AGE_DAYS = 5
+# Rich Audience reports low-volume accounts with a genuine multi-day lag — the
+# "Current month" range is requested correctly (verified: Start=1st, End=today),
+# but their data backfills several days behind. Observed ~7-day lag, so 5 was too
+# tight and blocked valid month-to-date data from being written. The MTD filter
+# already drops any last-month rows, so this guard only needs to catch a truly
+# stuck/broken fetch (data weeks old).
+MAX_ALLOWED_AGE_DAYS = 14
 HEADER = ["Domain", "Date", "Revenue", "Impression", "CPM"]
 
 
