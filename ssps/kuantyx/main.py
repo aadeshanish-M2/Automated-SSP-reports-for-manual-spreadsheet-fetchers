@@ -237,20 +237,29 @@ def download_kuantyx_csv(username: str, password: str) -> Path:
             log(f"WARNING: extra group-by select failed: {e}")
 
         try:
-            # Date range is a Kartik/bootstrap daterangepicker. Open it by
-            # clicking the .kv-drp-dropdown, then pick the "This Month" preset
-            # by its data-range-key. This is a HARD error if it fails — a wrong
-            # default ("Last Month") silently pulled last month's data before.
+            # Date range is a Kartik/bootstrap daterangepicker. Select the
+            # "This Month" preset via a native click on the element keyed by
+            # data-range-key (a bubbling click the picker's jQuery handler reads).
+            #
+            # DO NOT trust the picker's `.range-name` display label: it is buggy
+            # and shows "Last 30 Days" even when "This Month" is correctly applied
+            # (verified — clicking This Month pulls 1st-of-month → today, exactly
+            # MTD, while the label still reads "Last 30 Days"). An earlier
+            # label-based hard-fail rejected this CORRECT selection. Correctness is
+            # instead verified downstream against the real data: process_csv()
+            # filters to the current month and aborts if the newest date is stale
+            # (which is what actually catches a wrong-month pull).
             page.locator('.kv-drp-dropdown').first.click(timeout=10_000)
             page.wait_for_timeout(1000)
-            page.locator('li[data-range-key="This Month"]').first.click(timeout=10_000)
-            page.wait_for_timeout(800)
-            # Verify the selected range now reads This Month.
-            val = page.locator('.kv-drp-dropdown .range-name').first.inner_text(timeout=5000)
-            log(f"  date range set to: {val!r}")
-            if "this month" not in val.lower():
-                browser.close()
-                sys.exit(f"ERROR: date range did not switch to This Month (got {val!r}).")
+            page.evaluate("""() => {
+                const li = [...document.querySelectorAll('li[data-range-key]')]
+                    .find(e => (e.getAttribute('data-range-key')||'').trim().toLowerCase() === 'this month');
+                if (li) li.click();
+            }""")
+            page.wait_for_timeout(1200)
+            label = page.locator('.kv-drp-dropdown .range-name').first.inner_text(timeout=5000)
+            log(f"  clicked 'This Month' preset (picker label reads {label!r} — "
+                "label is cosmetic/buggy; actual range verified from CSV dates below)")
         except PlaywrightTimeoutError as e:
             browser.close()
             sys.exit(f"ERROR: Could not set date range to This Month.\nDetail: {e}")
