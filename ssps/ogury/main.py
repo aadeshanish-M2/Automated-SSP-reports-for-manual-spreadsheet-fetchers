@@ -118,6 +118,26 @@ def log(msg: str) -> None:
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
+# At the start of a month, SSPs haven't reported the new month's data yet
+# (reporting lag — Ogury's latest is typically 1-2 days behind), so an empty
+# current-month pull is EXPECTED, not a failure. Within this window we exit
+# successfully WITHOUT touching the sheet: the previous month's data already
+# preserved there keeps showing on the dashboard until new data starts flowing.
+# Outside the window, an empty pull means something genuinely broke → hard error.
+MONTH_START_GRACE_DAYS = 10
+
+
+def _empty_data_exit(reason: str) -> None:
+    day = datetime.now().day
+    if day <= MONTH_START_GRACE_DAYS:
+        log(f"No current-month data yet ({reason}); within first "
+            f"{MONTH_START_GRACE_DAYS} days of the month → treating as normal "
+            "reporting lag, not a failure. Leaving existing sheet data in place. "
+            "Skipping this run.")
+        sys.exit(0)
+    sys.exit(f"ERROR: {reason} — aborting.")
+
+
 _REQUIRED_KEYS = ("ogury_username", "ogury_password")
 
 
@@ -309,10 +329,14 @@ def process_csv(csv_path: Path) -> pd.DataFrame:
     try:
         df = pd.read_csv(StringIO("\n".join(lines[skip:])))
     except Exception as e:
+        # An empty body (no header/rows) means no data for the requested range —
+        # at month start this is expected reporting lag, not a parse failure.
+        if not "\n".join(lines[skip:]).strip():
+            _empty_data_exit("downloaded CSV has no data")
         sys.exit(f"ERROR: Could not parse CSV.\nDetail: {e}")
 
     if df.empty:
-        sys.exit("ERROR: Downloaded CSV is empty — aborting.")
+        _empty_data_exit("downloaded CSV is empty")
 
     df.columns = [c.strip() for c in df.columns]
     log(f"CSV columns: {list(df.columns)}")
@@ -423,6 +447,22 @@ def write_sheet(df: pd.DataFrame, creds) -> None:
         preserved.append(_r)
 
     merged = rows + preserved
+
+    # Guarantee ONE row per (Domain, Date) across the WHOLE sheet — not just the
+    # fresh rows. `rows` (this run's data) are listed first, so on any collision
+    # the fresh value wins and stale/duplicate preserved-history rows are dropped.
+    # This makes every write self-healing: it repairs pre-existing duplicate
+    # history (which had inflated month totals) instead of freezing it forever.
+    _seen = set()
+    _deduped = []
+    for _r in merged:
+        _key = (str(_r[0]).strip().lower(), str(_r[1]).strip()) if len(_r) >= 2 else None
+        if _key is not None and _key in _seen:
+            continue
+        if _key is not None:
+            _seen.add(_key)
+        _deduped.append(_r)
+    merged = _deduped
     merged.sort(key=lambda r: (str(r[1]) if len(r) > 1 else "", str(r[0]) if len(r) > 0 else ""))
     merged.sort(key=lambda r: str(r[1]) if len(r) > 1 else "", reverse=True)
 

@@ -226,19 +226,37 @@ def download_nobid_csv(username: str, password: str) -> Path:
             browser.close()
             sys.exit(f"ERROR: Could not click Run Report.\nDetail: {e}")
 
-        # The table renders in-page; give it time, then hit the cloud-download
-        # icon (Material CloudDownload svg, identified by its path data).
-        log("Waiting for report to render…")
-        page.wait_for_timeout(20_000)
+        # The table renders in-page. Rather than a blind fixed wait (which raced
+        # the render at month-start and failed), wait for the cloud-download icon
+        # to actually be visible, then click it. Retry once if the first click
+        # doesn't produce a download (the export can no-op if clicked a moment
+        # before the report finishes computing).
+        icon = page.locator('svg:has(path[d^="M19.35 10.04"])').first
+        log("Waiting for report + download icon to render…")
+        try:
+            icon.wait_for(state="visible", timeout=90_000)
+        except PlaywrightTimeoutError:
+            browser.close()
+            sys.exit("ERROR: Report/download icon never rendered — aborting.")
+        page.wait_for_timeout(4000)  # let the row's data settle after the icon paints
 
         log("Triggering CSV download (cloud icon)…")
-        try:
-            with page.expect_download(timeout=60_000) as dl_info:
-                page.locator('svg:has(path[d^="M19.35 10.04"])').first.click(timeout=15_000)
-            download = dl_info.value
-        except PlaywrightTimeoutError as e:
+        download = None
+        last_err = None
+        for attempt in range(2):
+            try:
+                icon.scroll_into_view_if_needed(timeout=10_000)
+                with page.expect_download(timeout=45_000) as dl_info:
+                    icon.click(timeout=15_000)
+                download = dl_info.value
+                break
+            except PlaywrightTimeoutError as e:
+                last_err = e
+                log(f"  download didn't start (attempt {attempt+1}/2); retrying…")
+                page.wait_for_timeout(6000)
+        if download is None:
             browser.close()
-            sys.exit(f"ERROR: CSV download did not start in time.\nDetail: {e}")
+            sys.exit(f"ERROR: CSV download did not start in time.\nDetail: {last_err}")
 
         tmp = Path(tempfile.mktemp(suffix=".csv"))
         download.save_as(str(tmp))
@@ -376,6 +394,22 @@ def write_sheet(df: pd.DataFrame, creds) -> None:
         preserved.append(_r)
 
     merged = rows + preserved
+
+    # Guarantee ONE row per (Domain, Date) across the WHOLE sheet — not just the
+    # fresh rows. `rows` (this run's data) are listed first, so on any collision
+    # the fresh value wins and stale/duplicate preserved-history rows are dropped.
+    # This makes every write self-healing: it repairs pre-existing duplicate
+    # history (which had inflated month totals) instead of freezing it forever.
+    _seen = set()
+    _deduped = []
+    for _r in merged:
+        _key = (str(_r[0]).strip().lower(), str(_r[1]).strip()) if len(_r) >= 2 else None
+        if _key is not None and _key in _seen:
+            continue
+        if _key is not None:
+            _seen.add(_key)
+        _deduped.append(_r)
+    merged = _deduped
     merged.sort(key=lambda r: (str(r[1]) if len(r) > 1 else "", str(r[0]) if len(r) > 0 else ""))
     merged.sort(key=lambda r: str(r[1]) if len(r) > 1 else "", reverse=True)
 

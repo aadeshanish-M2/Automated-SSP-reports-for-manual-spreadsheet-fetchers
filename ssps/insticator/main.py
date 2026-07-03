@@ -199,9 +199,20 @@ def download_insticator_csv(username: str, password: str) -> Path:
                 'button[type="submit"], button:has-text("Sign in"), '
                 'button:has-text("Log in"), button:has-text("Login")'
             )
-            page.wait_for_url(lambda u: "signin" not in u.lower() and "login" not in u.lower(),
-                              timeout=30_000)
+            # The post-login redirect can fire before wait_for_url starts
+            # listening (or navigate via SPA without a load event), so don't hard
+            # fail on the navigation wait — verify by URL afterwards instead.
+            try:
+                page.wait_for_url(
+                    lambda u: "signin" not in u.lower() and "login" not in u.lower(),
+                    timeout=30_000,
+                )
+            except PlaywrightTimeoutError:
+                pass
             page.wait_for_timeout(5000)
+            if "signin" in page.url.lower() or "login" in page.url.lower():
+                browser.close()
+                sys.exit("ERROR: Still on login page after submit — check credentials.")
         except PlaywrightTimeoutError as e:
             browser.close()
             sys.exit(f"ERROR: Login failed (timeout). Check credentials.\nDetail: {e}")
@@ -220,7 +231,26 @@ def download_insticator_csv(username: str, password: str) -> Path:
 
         log("Clicking Create New Report…")
         try:
-            page.locator('button:has-text("Create New Report")').first.click()
+            # The report list grows over time and the page can render slowly, so
+            # the button occasionally isn't immediately actionable. Wait for it to
+            # be visible, scroll it into view, then click — retry once if the first
+            # attempt races the page render.
+            btn = page.get_by_role("button", name="Create New Report")
+            if btn.count() == 0:
+                btn = page.locator('button:has-text("Create New Report")')
+            clicked = False
+            for attempt in range(2):
+                try:
+                    btn.first.wait_for(state="visible", timeout=30_000)
+                    btn.first.scroll_into_view_if_needed(timeout=10_000)
+                    btn.first.click(timeout=20_000)
+                    clicked = True
+                    break
+                except PlaywrightTimeoutError:
+                    if attempt == 0:
+                        page.wait_for_timeout(4000)
+            if not clicked:
+                raise PlaywrightTimeoutError("Create New Report not clickable after retry")
             page.wait_for_timeout(6000)
         except PlaywrightTimeoutError as e:
             browser.close()
@@ -475,6 +505,22 @@ def write_sheet(df: pd.DataFrame, creds) -> None:
 
 
     merged = rows + preserved
+
+    # Guarantee ONE row per (Domain, Date) across the WHOLE sheet — not just the
+    # fresh rows. `rows` (this run's data) are listed first, so on any collision
+    # the fresh value wins and stale/duplicate preserved-history rows are dropped.
+    # This makes every write self-healing: it repairs pre-existing duplicate
+    # history (which had inflated month totals) instead of freezing it forever.
+    _seen = set()
+    _deduped = []
+    for _r in merged:
+        _key = (str(_r[0]).strip().lower(), str(_r[1]).strip()) if len(_r) >= 2 else None
+        if _key is not None and _key in _seen:
+            continue
+        if _key is not None:
+            _seen.add(_key)
+        _deduped.append(_r)
+    merged = _deduped
 
 
     merged.sort(key=lambda r: (str(r[1]) if len(r) > 1 else "", str(r[0]) if len(r) > 0 else ""))

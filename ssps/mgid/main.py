@@ -362,6 +362,22 @@ def write_sheet(df: pd.DataFrame, creds) -> None:
 
     merged = rows + preserved
 
+    # Guarantee ONE row per (Domain, Date) across the WHOLE sheet — not just the
+    # fresh rows. `rows` (this run's data) are listed first, so on any collision
+    # the fresh value wins and stale/duplicate preserved-history rows are dropped.
+    # This makes every write self-healing: it repairs pre-existing duplicate
+    # history (which had inflated month totals) instead of freezing it forever.
+    _seen = set()
+    _deduped = []
+    for _r in merged:
+        _key = (str(_r[0]).strip().lower(), str(_r[1]).strip()) if len(_r) >= 2 else None
+        if _key is not None and _key in _seen:
+            continue
+        if _key is not None:
+            _seen.add(_key)
+        _deduped.append(_r)
+    merged = _deduped
+
 
     merged.sort(key=lambda r: (str(r[1]) if len(r) > 1 else "", str(r[0]) if len(r) > 0 else ""))
 
