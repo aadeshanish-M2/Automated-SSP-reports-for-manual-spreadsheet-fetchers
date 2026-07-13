@@ -166,6 +166,18 @@ def first_matching_column(df_cols, candidates):
     for cand in candidates:
         if cand.strip().lower() in norm:
             return norm[cand.strip().lower()]
+    # Fallback: punctuation-insensitive match. Kuantyx drifts the money-column
+    # headers between "Revenue", "Revenue, $" and "Revenue $" (and "eCPM"/"eCPM $"),
+    # which broke exact matching. Compare with all non-alphanumeric chars removed
+    # so every punctuation variant of the same header still resolves.
+    import re as _re
+    def _squash(x):
+        return _re.sub(r"[^a-z0-9]", "", str(x).lower())
+    squashed = {_squash(c): c for c in df_cols}
+    for cand in candidates:
+        key = _squash(cand)
+        if key and key in squashed:
+            return squashed[key]
     return None
 
 
