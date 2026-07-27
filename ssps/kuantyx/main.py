@@ -226,27 +226,23 @@ def download_kuantyx_csv(username: str, password: str) -> Path:
             browser.close()
             sys.exit(f"ERROR: Could not open Statistics.\nDetail: {e}")
 
-        log("Setting Group by = Day, Group by (extra) = Website, range = This Month…")
+        log("Setting Group by = Day, Then by = Website, range = This Month…")
+        # Target the two group-by <select>s by their STABLE IDs (#group primary,
+        # #group2 secondary). Kuantyx renamed the secondary label from
+        # "Group by (extra)" to "Then by", which broke the old label-based
+        # selector and silently dropped the Website breakdown from the export.
         try:
-            # Primary group-by → "Day"
-            page.locator(
-                'label:has-text("Group by") + * select, '
-                'label:has-text("Group by") ~ select, '
-                'select:near(:text("Group by"))'
-            ).first.select_option(label="Day")
+            page.locator('#group').select_option(label="Day", timeout=15_000)
             page.wait_for_timeout(500)
         except Exception as e:
-            log(f"WARNING: primary group-by select failed: {e}")
+            log(f"WARNING: primary group-by (#group=Day) select failed: {e}")
 
         try:
-            # Secondary "Group by (extra)" → "Website"
-            page.locator(
-                'label:has-text("Group by (extra)") + * select, '
-                'label:has-text("Group by (extra)") ~ select'
-            ).first.select_option(label="Website")
+            # Secondary group-by → "Website" (id="group2"; label now "Then by").
+            page.locator('#group2').select_option(label="Website", timeout=15_000)
             page.wait_for_timeout(500)
         except Exception as e:
-            log(f"WARNING: extra group-by select failed: {e}")
+            log(f"WARNING: secondary group-by (#group2=Website) select failed: {e}")
 
         try:
             # Date range is a Kartik/bootstrap daterangepicker. Select the
