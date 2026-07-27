@@ -351,11 +351,23 @@ def process_csv(csv_path: Path) -> pd.DataFrame:
 
     newest = df["__date"].max()
     age_days = (datetime.now() - newest).days
-    if age_days > MAX_ALLOWED_AGE_DAYS:
+    # The age guard exists to catch a fetch STUCK on old/previous-month data.
+    # But Rich Audience is a very low-volume account that regularly goes quiet
+    # for stretches (verified: zero activity for weeks at a time), so its newest
+    # date can be legitimately old while still being valid current-month data.
+    # Only hard-fail when the newest date is NOT in the current month (a genuine
+    # stuck/wrong-month signal); otherwise accept the low-volume data with a
+    # warning rather than failing the sync every day.
+    newest_in_current_month = newest.strftime("%Y-%m") == datetime.now().strftime("%Y-%m")
+    if age_days > MAX_ALLOWED_AGE_DAYS and not newest_in_current_month:
         sys.exit(
-            f"ERROR: Newest date is {newest.date()} ({age_days} days ago). "
-            f"Expected within {MAX_ALLOWED_AGE_DAYS} days — aborting."
+            f"ERROR: Newest date is {newest.date()} ({age_days} days ago) and is "
+            f"outside the current month — looks stuck/broken, aborting."
         )
+    if age_days > MAX_ALLOWED_AGE_DAYS:
+        log(f"WARNING: newest date {newest.date()} is {age_days} days old but is "
+            "within the current month — Rich Audience has no recent activity "
+            "(low-volume account). Writing the available data instead of failing.")
 
     # MTD filter with month-boundary fallback
     first_of_month = pd.Timestamp(datetime.now().replace(day=1).date())
