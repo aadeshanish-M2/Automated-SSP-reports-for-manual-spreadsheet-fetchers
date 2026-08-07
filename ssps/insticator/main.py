@@ -326,21 +326,63 @@ def download_insticator_csv(username: str, password: str) -> Path:
             sys.exit(f"ERROR: Could not save the report.\nDetail: {e}")
 
         log(f"Finding the '{report_name}' row and clicking its Download icon…")
-        try:
-            # The name cell's parent IS the row container that holds all columns
-            # including the icon-actions cell (edit / download / trash spans).
-            name_cell = page.get_by_text(report_name, exact=True).first
-            row = name_cell.locator('xpath=..')
-            download_icon = row.locator('span.name-download').first
-            with page.expect_download(timeout=180_000) as dl_info:
-                download_icon.click(timeout=15_000)
-            download = dl_info.value
-        except PlaywrightTimeoutError as e:
+        # Insticator generates the report ASYNCHRONOUSLY and it is genuinely slow
+        # — the row shows a "processing" clock for ~10-15 minutes before the icon
+        # becomes a live download. Clicking before then does nothing (no download
+        # event fires). So poll for up to ~20 minutes: each attempt reloads the
+        # list, re-finds the row, and tries the download; it succeeds the moment
+        # the report finishes generating.
+        MAX_ATTEMPTS = 22          # ~22 × ~55s ≈ 20 min
+        download = None
+        last_err = None
+        for attempt in range(MAX_ATTEMPTS):
+            try:
+                if attempt > 0:
+                    page.reload(wait_until="domcontentloaded")
+                    page.wait_for_timeout(6000)
+                name_cell = page.get_by_text(report_name, exact=True).first
+                name_cell.wait_for(state="visible", timeout=20_000)
+                download_icon = name_cell.locator('xpath=..').locator('span.name-download').first
+                download_icon.wait_for(state="visible", timeout=15_000)
+                download_icon.scroll_into_view_if_needed(timeout=8000)
+                with page.expect_download(timeout=20_000) as dl_info:
+                    download_icon.click(timeout=15_000)
+                download = dl_info.value
+                break
+            except PlaywrightTimeoutError as e:
+                last_err = e
+                log(f"  not ready yet (attempt {attempt + 1}/{MAX_ATTEMPTS}) — report "
+                    "still generating (~10-15 min is normal); waiting before retry…")
+                page.wait_for_timeout(25_000)
+        if download is None:
             browser.close()
-            sys.exit(f"ERROR: CSV download did not start in time.\nDetail: {e}")
+            sys.exit(f"ERROR: CSV download did not start in time.\nDetail: {last_err}")
 
         tmp = Path(tempfile.mktemp(suffix=".csv"))
         download.save_as(str(tmp))
+
+        # Delete the report we just created. Insticator creates a NEW report every
+        # run, and left uncleaned they pile up (hit 111 once) — a large backlog
+        # congests report GENERATION, so new reports stay stuck "processing" and
+        # downloads stop working entirely. Cleaning up after ourselves keeps the
+        # list tiny. Best-effort: the data is already downloaded, so never fail
+        # the sync if cleanup doesn't take.
+        try:
+            page.on("dialog", lambda d: d.accept())
+            trash = (page.get_by_text(report_name, exact=True).first
+                     .locator('xpath=..').locator('span.name-trash').first)
+            trash.click(timeout=8000)
+            page.wait_for_timeout(800)
+            for _lbl in ("Delete", "Yes", "Confirm", "OK", "Remove"):
+                _btn = page.locator(f'button:has-text("{_lbl}"):visible')
+                if _btn.count() > 0:
+                    _btn.first.click(timeout=4000)
+                    break
+            page.wait_for_timeout(1500)
+            log("Cleaned up the generated report (prevents backlog buildup).")
+        except Exception as _e:
+            log(f"NOTE: could not delete the generated report (harmless): {str(_e)[:60]}")
+
         browser.close()
 
     log(f"CSV downloaded → {tmp}")
