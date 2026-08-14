@@ -309,7 +309,13 @@ def process_csv(csv_path: Path) -> pd.DataFrame:
             break
     try:
         from io import StringIO
-        df = pd.read_csv(StringIO("\n".join(lines[skip:])))
+        # dtype=str is REQUIRED: Vidoomy formats numbers European-style ('.' as
+        # thousands separator, e.g. "6.420" = 6420). Without this, pandas
+        # auto-parses those columns to float ("6.420" → 6.42, "271" → 271.0),
+        # destroying the value before clean_european_number can interpret it
+        # (it would then read 6.42 → 642, 271.0 → 2710). Reading everything as
+        # strings lets clean_european_number handle the raw text correctly.
+        df = pd.read_csv(StringIO("\n".join(lines[skip:])), dtype=str)
     except Exception as e:
         sys.exit(f"ERROR: Could not parse CSV.\nDetail: {e}")
 
