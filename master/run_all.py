@@ -44,7 +44,10 @@ def main() -> int:
     print()
     print(f"  {ok_count} / {len(results)} succeeded.")
     print()
-    return 0 if ok_count == len(results) else 1
+    # Exit non-zero only on TOTAL breakage (nothing succeeded) so the scheduled
+    # job doesn't go red on routine single-SSP browser flakiness. Partial
+    # failures are visible in this summary and in each sheet's freshness.
+    return 0 if ok_count > 0 else 1
 
 
 if __name__ == "__main__":

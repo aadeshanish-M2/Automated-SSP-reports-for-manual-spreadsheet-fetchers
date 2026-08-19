@@ -1,0 +1,64 @@
+name: Daily SSP Reports
+
+# Runs every SSP sync in sequence and writes fresh data into the Google Sheets
+# (which back the dashboard + the exclusive publisher report). Fully hands-off.
+on:
+  schedule:
+    # 06:00 UTC every day. Adjust this time to suit your reporting timezone.
+    - cron: "0 6 * * *"
+  workflow_dispatch: {}          # lets you also trigger a run manually from the Actions tab
+
+concurrency:
+  group: daily-ssp-reports
+  cancel-in-progress: false      # never interrupt an in-progress run
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90          # Insticator alone can take ~20 min (slow report generation)
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies + Playwright Chromium
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          python -m playwright install --with-deps chromium
+
+      - name: Run all SSP reports
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          TEAL_USERNAME:          ${{ secrets.TEAL_USERNAME }}
+          TEAL_PASSWORD:          ${{ secrets.TEAL_PASSWORD }}
+          NEXXEN_API_USERNAME:    ${{ secrets.NEXXEN_API_USERNAME }}
+          NEXXEN_API_PASSWORD:    ${{ secrets.NEXXEN_API_PASSWORD }}
+          NEXXEN_API_KEY:         ${{ secrets.NEXXEN_API_KEY }}
+          MGID_CLIENT_ID:         ${{ secrets.MGID_CLIENT_ID }}
+          MGID_API_TOKEN:         ${{ secrets.MGID_API_TOKEN }}
+          KUANTYX_USERNAME:       ${{ secrets.KUANTYX_USERNAME }}
+          KUANTYX_PASSWORD:       ${{ secrets.KUANTYX_PASSWORD }}
+          ADSOLUT_USERNAME:       ${{ secrets.ADSOLUT_USERNAME }}
+          ADSOLUT_PASSWORD:       ${{ secrets.ADSOLUT_PASSWORD }}
+          YANDEX_OAUTH_TOKEN:     ${{ secrets.YANDEX_OAUTH_TOKEN }}
+          INSTICATOR_USERNAME:    ${{ secrets.INSTICATOR_USERNAME }}
+          INSTICATOR_PASSWORD:    ${{ secrets.INSTICATOR_PASSWORD }}
+          VIDOOMY_USERNAME:       ${{ secrets.VIDOOMY_USERNAME }}
+          VIDOOMY_PASSWORD:       ${{ secrets.VIDOOMY_PASSWORD }}
+          NOBID_USERNAME:         ${{ secrets.NOBID_USERNAME }}
+          NOBID_PASSWORD:         ${{ secrets.NOBID_PASSWORD }}
+          RICHAUDIENCE_USERNAME:  ${{ secrets.RICHAUDIENCE_USERNAME }}
+          RICHAUDIENCE_PASSWORD:  ${{ secrets.RICHAUDIENCE_PASSWORD }}
+          MEDIAFUSE_PASSWORD:     ${{ secrets.MEDIAFUSE_PASSWORD }}
+          OGURY_USERNAME:         ${{ secrets.OGURY_USERNAME }}
+          OGURY_PASSWORD:         ${{ secrets.OGURY_PASSWORD }}
+          OPTIDIGITAL_USERNAME:   ${{ secrets.OPTIDIGITAL_USERNAME }}
+          OPTIDIGITAL_PASSWORD:   ${{ secrets.OPTIDIGITAL_PASSWORD }}
+          CONNATIX_USERNAME:      ${{ secrets.CONNATIX_USERNAME }}
+          CONNATIX_PASSWORD:      ${{ secrets.CONNATIX_PASSWORD }}
+          MINUTEMEDIA_API_KEY:    ${{ secrets.MINUTEMEDIA_API_KEY }}
+        run: python master/run_all.py
