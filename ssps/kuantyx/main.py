@@ -32,7 +32,7 @@ LOGIN_URL = "https://panel.kuantyx.com/publish"
 
 # CSV column-name candidates — adjust on first run once we see the actual headers.
 DATE_COL_CANDIDATES = ["Date", "Day", "date", "day"]
-SITE_COL_CANDIDATES = ["Website", "Site", "Domain", "website", "site"]
+SITE_COL_CANDIDATES = ["Inventory", "Website", "Site", "Domain", "website", "site", "inventory"]
 IMPR_COL_CANDIDATES = ["Impressions", "Imps", "impressions"]
 REV_COL_CANDIDATES  = ["Revenue, $", "Revenue", "Earnings", "revenue"]
 ECPM_COL_CANDIDATES = ["eCPM, $", "eCPM", "ECPM", "Effective CPM", "ecpm"]
@@ -233,16 +233,35 @@ def download_kuantyx_csv(username: str, password: str) -> Path:
         # selector and silently dropped the Website breakdown from the export.
         try:
             page.locator('#group').select_option(label="Day", timeout=15_000)
-            page.wait_for_timeout(500)
+            page.wait_for_timeout(1000)
         except Exception as e:
             log(f"WARNING: primary group-by (#group=Day) select failed: {e}")
 
-        try:
-            # Secondary group-by → "Website" (id="group2"; label now "Then by").
-            page.locator('#group2').select_option(label="Website", timeout=15_000)
-            page.wait_for_timeout(500)
-        except Exception as e:
-            log(f"WARNING: secondary group-by (#group2=Website) select failed: {e}")
+        # Secondary group-by → the per-site dimension. Kuantyx keeps renaming
+        # this option — it was "Website", it is now "Inventory" — so try the known
+        # aliases and pick whichever the dropdown currently offers. The <option>
+        # list also loads asynchronously, so poll first, then verify it stuck.
+        _SITE_OPTIONS = ["Inventory", "Website"]
+        _g2_ok = False
+        for _attempt in range(5):
+            try:
+                _label = page.locator('#group2').evaluate(
+                    "(s, labels) => { const t = [...s.options].map(o => (o.text || '').trim());"
+                    " return labels.find(l => t.includes(l)) || ''; }", _SITE_OPTIONS)
+                if _label:
+                    page.locator('#group2').select_option(label=_label, timeout=8_000)
+                    page.wait_for_timeout(500)
+                    _val = page.locator('#group2').evaluate(
+                        "s => ((s.options[s.selectedIndex] || {}).text || '').trim()")
+                    if _val == _label:
+                        log(f"  secondary group-by set to {_label!r}.")
+                        _g2_ok = True
+                        break
+            except Exception:
+                pass
+            page.wait_for_timeout(2500)
+        if not _g2_ok:
+            log("WARNING: secondary group-by (site dimension) did not stick after retries.")
 
         try:
             # Date range is a Kartik/bootstrap daterangepicker. Select the
