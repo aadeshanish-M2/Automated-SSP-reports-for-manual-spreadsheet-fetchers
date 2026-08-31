@@ -45,7 +45,19 @@ HEADER = ["Domain", "Date", "Revenue", "Impression", "CPM"]
 # we mirror just these domains into a separate sheet they can be given view
 # access to — refreshed every time Vidoomy runs, so no extra scheduling needed.
 PUBLISHER_SHEET_ID = os.environ.get("VIDOOMY_PUBLISHER_SHEET_ID") or "1To7GHmsP1UvjneHiFEl8CVYfCmYj6gMYS5DYghYMAls"
-PUBLISHER_DOMAINS  = {"cutetarots.com", "movievibe.net", "judgeiq.net"}
+# Match the ROOT-domain forms the main sheet stores (subdomains + "www." are
+# stripped by _normalize_and_aggregate), so the publisher's original site names
+# map as: sprint.ghanalatestnews.com → ghanalatestnews.com, www.bestgames.com →
+# bestgames.com. Sites with no Vidoomy data yet appear automatically once they do.
+PUBLISHER_DOMAINS  = {
+    "cosmobasics.com",
+    "cutetarots.com",
+    "ghanalatestnews.com",     # publisher's sprint.ghanalatestnews.com
+    "biznestconsultants.com",
+    "bestgames.com",           # publisher's www.bestgames.com
+    "judgeiq.net",
+    "movievibe.net",
+}
 
 
 def _normalize_and_aggregate(rows):
@@ -514,9 +526,9 @@ def write_sheet(df: pd.DataFrame, creds) -> None:
 
 def write_publisher_report(creds) -> None:
     """Mirror just PUBLISHER_DOMAINS from the main Vidoomy sheet into the
-    publisher's exclusive sheet, with a per-site summary on top. Best-effort:
-    never fail the main Vidoomy sync if this doesn't write."""
-    from collections import defaultdict
+    publisher's exclusive sheet — daily data only (Domain | Date | Revenue |
+    Impression | CPM), no title/summary. Best-effort: never fail the main
+    Vidoomy sync if this doesn't write."""
     log("Updating exclusive publisher report (Vidoomy, selected sites)…")
     service = build("sheets", "v4", credentials=creds, cache_discovery=False)
 
@@ -531,32 +543,8 @@ def write_publisher_report(creds) -> None:
     data.sort(key=lambda r: (str(r[1]), str(r[0])))
     data.sort(key=lambda r: str(r[1]), reverse=True)   # newest date first
 
-    def _rev(x):
-        try: return float(str(x).lstrip("$").replace(",", ""))
-        except Exception: return 0.0
-    def _imp(x):
-        try: return int(float(str(x).replace(",", "")))
-        except Exception: return 0
-
-    summ = defaultdict(lambda: [0, 0.0, 0])   # domain -> [days, revenue, impressions]
-    for r in data:
-        s = summ[str(r[0]).strip().lower()]
-        s[0] += 1; s[1] += _rev(r[2] if len(r) > 2 else 0); s[2] += _imp(r[3] if len(r) > 3 else 0)
-
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M")
-    out = [
-        ["Vidoomy — Publisher Report (updates automatically each Vidoomy run)"],
-        [f"Last updated: {ts}"],
-        [],
-        ["Site", "Days", "Total Revenue", "Total Impressions", "Avg CPM"],
-    ]
-    g_rev = g_imp = 0
-    for dom in sorted(summ):
-        days, rev, imp = summ[dom]
-        out.append([dom, days, f"${rev:.2f}", imp, round(rev / imp * 1000, 4) if imp else 0.0])
-        g_rev += rev; g_imp += imp
-    out.append(["TOTAL", "", f"${g_rev:.2f}", g_imp, round(g_rev / g_imp * 1000, 4) if g_imp else 0.0])
-    out += [[], ["Daily detail"], HEADER] + data
+    out = [HEADER] + data
+    summ_sites = sorted({str(r[0]).strip().lower() for r in data})
 
     try:
         pmeta = service.spreadsheets().get(
@@ -569,8 +557,8 @@ def write_publisher_report(creds) -> None:
     service.spreadsheets().values().update(
         spreadsheetId=PUBLISHER_SHEET_ID, range=f"{ptab}!A1",
         valueInputOption="USER_ENTERED", body={"values": out}).execute()
-    log(f"Publisher report updated: {len(data)} rows across {len(summ)} site(s) "
-        f"({', '.join(sorted(summ)) or 'none yet'}).")
+    log(f"Publisher report updated: {len(data)} rows across {len(summ_sites)} site(s) "
+        f"({', '.join(summ_sites) or 'none yet'}).")
 
 
 def main():
