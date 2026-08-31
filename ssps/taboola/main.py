@@ -42,7 +42,15 @@ SCOPES         = ["https://www.googleapis.com/auth/spreadsheets"]
 
 BACKSTAGE  = "https://backstage.taboola.com/backstage"
 TOKEN_URL  = f"{BACKSTAGE}/oauth/token"
-DIMENSION  = "day_site_placement_breakdown"   # date + publisher + page_type + placement
+# Use the "day" dimension — the correctly-deduplicated daily total that matches
+# the Taboola dashboard. Do NOT use day_site_placement_breakdown: Taboola counts
+# 1 page view per page regardless of how many placements are on it, so summing
+# the per-placement rows multiplies page_views (and overlaps revenue) — it
+# produced ~3× page views / ~2× revenue vs the dashboard.
+DIMENSION  = "day"
+# The "day" dimension has no publisher column, and this account is a single
+# publisher, so we label every row with a fixed Domain.
+DOMAIN_LABEL = "Monetize More Reseller"
 
 MAX_ALLOWED_AGE_DAYS = 5
 HEADER = ["Domain", "Date", "Revenue", "Impression", "CPM"]
@@ -229,12 +237,16 @@ def process_results(results: list) -> pd.DataFrame:
         _empty_data_exit("API returned no rows for the current month")
 
     df = pd.DataFrame(results)
-    for col in ("date", "publisher_name", "ad_revenue", "page_views"):
+    for col in ("date", "ad_revenue", "page_views"):
         if col not in df.columns:
             sys.exit(f"ERROR: expected field {col!r} missing from API response. "
                      f"Got: {list(df.columns)} — aborting to protect the sheet.")
+    # "day" dimension has no publisher column → use the fixed label. (If a
+    # publisher-broken-down dimension is ever used, honour its publisher_name.)
+    if "publisher_name" not in df.columns:
+        df["publisher_name"] = DOMAIN_LABEL
 
-    df = df.dropna(subset=["date", "publisher_name"])
+    df = df.dropna(subset=["date"])
     # Taboola dates look like "2026-08-30 00:00:00.0" — take the date part.
     df["__date"] = pd.to_datetime(df["date"], errors="coerce")
     bad = df["__date"].isna().sum()
@@ -269,8 +281,13 @@ def process_results(results: list) -> pd.DataFrame:
         "CPM":         0.0,   # recomputed from totals in _normalize_and_aggregate
     })
     out = out[~out["Domain"].str.lower().isin(["", "nan", "none"])]
+    # The "day" dimension emits a row for EVERY calendar day, including days with
+    # no Taboola activity (0 page views + $0). Drop those no-activity rows so the
+    # sheet only carries real data (a day with traffic but $0 revenue is kept).
+    out = out[(pd.to_numeric(out["Impressions"], errors="coerce").fillna(0) > 0)
+              | (pd.to_numeric(out["Revenue"], errors="coerce").fillna(0) > 0)]
     if out.empty:
-        _empty_data_exit("no valid rows after cleaning")
+        _empty_data_exit("no rows with activity for the current month")
 
     log(f"Valid: {len(out)} rows, dates {out['Date'].min()} → {out['Date'].max()}")
     return out
