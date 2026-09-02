@@ -272,12 +272,18 @@ def download_vidoomy_csv(username: str, password: str) -> Path:
         except Exception as e:
             log(f"WARNING: preset switch failed: {e}")
 
-        log("Setting date range preset = Current month…")
+        log("Setting date range preset = Last 30 days…")
         try:
+            # Use a rolling 30-day window rather than "Current month". With MTD,
+            # the LAST day of a month is captured partial (it's "today") and then
+            # frozen forever, because the next run is in a new month and only
+            # refreshes the new month. A rolling 30-day window always spans the
+            # month boundary, so the previous month's final day gets its complete
+            # value on the 1st of the next month. write_sheet refreshes exactly
+            # the pulled dates and preserves everything older.
             page.locator(':text("Date")').first.click(timeout=8_000)
             page.wait_for_timeout(1200)
-            # Vidoomy's actual label is "Current month" (lowercase m).
-            page.get_by_text("Current month", exact=True).first.click(timeout=5000)
+            page.get_by_text("Last 30 days", exact=True).first.click(timeout=5000)
             page.wait_for_timeout(1500)
         except Exception as e:
             log(f"WARNING: date-range selector failed: {e}")
@@ -382,15 +388,11 @@ def process_csv(csv_path: Path) -> pd.DataFrame:
             f"Expected within {MAX_ALLOWED_AGE_DAYS} days — aborting."
         )
 
-    first_of_month = pd.Timestamp(datetime.now().replace(day=1).date())
-    _pre_mtd_df = df.copy()
-    before = len(df)
-    df = df[df["__date"] >= first_of_month]
-    if before != len(df):
-        log(f"Filtered to MTD ({first_of_month.date()} onward): kept {len(df)}, dropped {before - len(df)}.")
-    if df.empty:
-        log("WARNING: 0 rows match current-month filter — falling back to full report (likely a month-boundary day, MTD data not available yet).")
-        df = _pre_mtd_df
+    # Keep the full pulled window (rolling last-30-days). We deliberately do NOT
+    # MTD-filter anymore: the window spans the month boundary so the previous
+    # month's final day is refreshed to its complete value. write_sheet replaces
+    # exactly the dates present here and preserves everything older.
+    log(f"Keeping full pulled window: {len(df)} rows, {df['__date'].min().date()} → {df['__date'].max().date()}.")
 
     out = pd.DataFrame({
         "Date":        df["__date"].dt.strftime("%Y-%m-%d"),
@@ -437,7 +439,9 @@ def write_sheet(df: pd.DataFrame, creds) -> None:
     rows.sort(key=lambda r: (r[0], r[1]))
     rows.sort(key=lambda r: r[0], reverse=True)
 
-    # Preserve previous-month rows; only the current month gets refreshed.
+    # Refresh exactly the dates in this run's pull (rolling ~30-day window) and
+    # preserve every older row. This is what lets a month's final day get its
+    # complete value once it's no longer "today" (fixes the month-boundary freeze).
 
 
     existing = service.spreadsheets().values().get(
@@ -449,7 +453,7 @@ def write_sheet(df: pd.DataFrame, creds) -> None:
     ).execute().get("values", [])
 
 
-    current_month = datetime.now().strftime("%Y-%m")
+    fresh_dates = {str(r[1]).strip() for r in rows if len(r) > 1}
 
 
     preserved = []
@@ -464,10 +468,10 @@ def write_sheet(df: pd.DataFrame, creds) -> None:
             continue
 
 
-        if len(_r) >= 2 and str(_r[1]).strip().startswith(current_month):
+        if len(_r) >= 2 and str(_r[1]).strip() in fresh_dates:
 
 
-            continue  # current-month row → will be replaced by fresh data
+            continue  # date is in this run's pull → replaced by fresh data
 
 
         preserved.append(_r)
@@ -509,7 +513,7 @@ def write_sheet(df: pd.DataFrame, creds) -> None:
         return str(cell)
     merged = [[_stringify(c) for c in r] for r in merged]
     final_rows = [HEADER] + merged
-    log(f"Writing {len(merged)} rows = {len(rows)} new MTD + {len(preserved)} preserved (history)…")
+    log(f"Writing {len(merged)} rows = {len(rows)} refreshed (last ~30d) + {len(preserved)} preserved (history)…")
     service.spreadsheets().values().clear(
         spreadsheetId=SPREADSHEET_ID, range=_tab, body={},
     ).execute()
