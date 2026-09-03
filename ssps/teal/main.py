@@ -286,15 +286,12 @@ def process_csv(csv_path: Path) -> pd.DataFrame:
             f"       Expected data within the last {MAX_ALLOWED_AGE_DAYS} days — aborting."
         )
 
-    # Filter to month-to-date (1st of current month → today).
-    first_of_month = pd.Timestamp(datetime.now().replace(day=1).date())
-    _pre_mtd_df = df.copy()
-    before = len(df)
-    df = df[df["Date"] >= first_of_month]
-    log(f"Filtered to MTD ({first_of_month.date()} onward): kept {len(df)}, dropped {before - len(df)}.")
-    if df.empty:
-        log("WARNING: 0 rows match current-month filter — falling back to full report (likely a month-boundary day, MTD data not available yet).")
-        df = _pre_mtd_df
+    # Keep the FULL pulled window (Teal exports ~28 days) — do NOT MTD-filter.
+    # Refreshing the whole window lets the previous month's final day get its
+    # complete value once it's no longer "today"; the write step's per-(Domain,
+    # Date) dedup lets these fresh rows overwrite the frozen partial. Older
+    # history (before the window) is preserved untouched. Fixes month-boundary freeze.
+    log(f"Keeping full pulled window: {len(df)} rows, {df['Date'].min().date()} → {df['Date'].max().date()}.")
 
     # Coerce numeric columns
     df["Impressions"] = pd.to_numeric(df["Impressions"], errors="coerce").fillna(0)

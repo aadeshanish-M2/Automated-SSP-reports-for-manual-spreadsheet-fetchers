@@ -13,7 +13,7 @@ import json
 import os
 import sys
 import tempfile
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from io import StringIO
 from pathlib import Path
 
@@ -184,7 +184,7 @@ def download_optidigital_csv(username: str, password: str) -> Path:
         sys.exit(f"ERROR: No access_token in auth response: {r.text[:300]}")
 
     today = date.today()
-    first = date(today.year, today.month, 1)
+    first = today - timedelta(days=30)   # rolling window spans the month boundary
     log(f"Fetching site report {first.isoformat()} → {today.isoformat()}…")
     rr = requests.get(
         f"{API_BASE}/v1/reports/site/csv",
@@ -260,14 +260,11 @@ def process_csv(csv_path: Path) -> pd.DataFrame:
             f"Expected within {MAX_ALLOWED_AGE_DAYS} days — aborting."
         )
 
-    # MTD filter with month-boundary fallback
-    first_of_month = pd.Timestamp(datetime.now().replace(day=1).date())
-    _pre_mtd_df = df.copy()
-    df = df[df["__date"] >= first_of_month]
-    if df.empty:
-        log("WARNING: 0 rows match current-month filter — falling back to full report "
-            "(likely a month-boundary day, MTD data not available yet).")
-        df = _pre_mtd_df
+    # Keep the FULL pulled window (rolling ~30 days) — do NOT MTD-filter, so the
+    # previous month's final day is refreshed once it is no longer "today". The
+    # write step's per-(Domain, Date) dedup overwrites any frozen partial and
+    # older history is preserved. Fixes the month-boundary freeze.
+    log(f"Keeping full pulled window: {len(df)} rows.")
 
     out = pd.DataFrame({
         "Date":        df["__date"].dt.strftime("%Y-%m-%d"),

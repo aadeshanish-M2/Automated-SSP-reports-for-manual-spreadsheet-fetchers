@@ -306,15 +306,12 @@ def process_df(df: pd.DataFrame) -> pd.DataFrame:
             f"       Expected data within the last {MAX_ALLOWED_AGE_DAYS} days — aborting."
         )
 
-    # Filter to month-to-date (1st of current month → today).
-    first_of_month = pd.Timestamp(datetime.now().replace(day=1).date())
-    _pre_mtd_df = df.copy()
-    before = len(df)
-    df = df[df["__date"] >= first_of_month]
-    log(f"Filtered to MTD ({first_of_month.date()} onward): kept {len(df)}, dropped {before - len(df)}.")
-    if df.empty:
-        log("WARNING: 0 rows match current-month filter — falling back to full report (likely a month-boundary day, MTD data not available yet).")
-        df = _pre_mtd_df
+    # Keep the FULL pulled window (Nexxen dateRange = LAST_30_DAYS) — do NOT
+    # MTD-filter. Refreshing the whole window lets the previous month's final day
+    # get its complete value once it's no longer "today"; the write step's
+    # per-(Domain, Date) dedup lets these fresh rows overwrite any frozen partial,
+    # and older history is preserved. Fixes the month-boundary freeze.
+    log(f"Keeping full pulled window: {len(df)} rows, {df['__date'].min().date()} → {df['__date'].max().date()}.")
 
     out = pd.DataFrame({
         "Date":            df["__date"].dt.strftime("%Y-%m-%d"),

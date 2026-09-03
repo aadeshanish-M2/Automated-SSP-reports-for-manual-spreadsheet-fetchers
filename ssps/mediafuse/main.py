@@ -262,13 +262,12 @@ def process_xlsx(xlsx_path: Path) -> pd.DataFrame:
             f"Expected within {MAX_ALLOWED_AGE_DAYS} days — aborting."
         )
 
-    # MTD filter with month-boundary fallback
-    first_of_month = pd.Timestamp(datetime.now().replace(day=1).date())
-    _pre_mtd_df = df.copy()
-    df = df[df["__date"] >= first_of_month]
-    if df.empty:
-        log("WARNING: 0 rows match current-month filter — falling back to full report.")
-        df = _pre_mtd_df
+    # Keep the FULL pulled window (MediaFuse's default export is ~30 days) — do
+    # NOT MTD-filter. Refreshing the whole window lets the previous month's final
+    # day get its complete value once it's no longer "today"; the write step's
+    # per-(Domain, Date) dedup lets these fresh rows overwrite any frozen partial,
+    # and older history is preserved. Fixes the month-boundary freeze.
+    log(f"Keeping full pulled window: {len(df)} rows, {df['__date'].min().date()} → {df['__date'].max().date()}.")
 
     # Site labels look like "MonetizeMore - clark" — strip the network prefix.
     sites = (df[site_col].astype(str).str.strip()

@@ -20,7 +20,7 @@ Field slugs (pubs_external): domain, date, total=Net Revenue,
 import json
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, date, timedelta
 
 import pandas as pd
 import requests
@@ -189,9 +189,12 @@ def fetch_report(api_key: str) -> list:
         "Authorization": f"MM-API-Key {api_key}",
         "Content-Type": "application/json",
     }
+    _today = date.today(); _from = _today - timedelta(days=30)
     payload = {
-        "dateRange": None,
-        "dateRangePreset": "month",   # current month-to-date
+        # Rolling ~30-day window (not the "month" preset) so the previous month's
+        # final day is refreshed once it is no longer "today" — fixes month-boundary freeze.
+        "dateRange": [_from.isoformat(), _today.isoformat()],
+        "dateRangePreset": None,
         "dimensions": ["date", "domain"],
         "filters": [],
         "metrics": ["total", "impressions", "net_cpm"],
@@ -249,14 +252,11 @@ def process_reports(reports: list) -> pd.DataFrame:
             f"Expected within {MAX_ALLOWED_AGE_DAYS} days — aborting."
         )
 
-    # MTD filter with month-boundary fallback (the "month" preset is already MTD).
-    first_of_month = pd.Timestamp(datetime.now().replace(day=1).date())
-    _pre_mtd_df = df.copy()
-    df = df[df["__date"] >= first_of_month]
-    if df.empty:
-        log("WARNING: 0 rows match current-month filter — falling back to full report "
-            "(likely a month-boundary day).")
-        df = _pre_mtd_df
+    # Keep the FULL pulled window (rolling ~30 days) — do NOT MTD-filter, so the
+    # previous month's final day is refreshed once it is no longer "today". The
+    # write step's per-(Domain, Date) dedup overwrites any frozen partial and
+    # older history is preserved. Fixes the month-boundary freeze.
+    log(f"Keeping full pulled window: {len(df)} rows.")
 
     out = pd.DataFrame({
         "Date":        df["__date"].dt.strftime("%Y-%m-%d"),
