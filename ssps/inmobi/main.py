@@ -9,7 +9,10 @@ uniform format (Domain | Date | Revenue | Impression | CPM). Previous-month
 history is preserved; only current-month rows are refreshed.
 
 Mapping (InMobi → uniform):
-  Domain = bundleId (app bundle / site, e.g. "inmobidefaultwebsite.com")
+  Domain = requestBundleId (the requested app bundle ID = the real publisher
+           site/app that made the ad request, e.g. "bcn-news.com". This is the
+           dimension that actually breaks out individual sites — the "site"
+           dimension only ever returned InMobi's single default placement.)
   Date   = date (GMT)
   Revenue = earnings
   Impression = adImpressions  (rendered ad impressions; InMobi's eCPM basis)
@@ -205,9 +208,9 @@ def fetch_report(cfg: dict) -> list:
     body = {"reportRequest": {
         "metrics": ["earnings", "adImpressions"],
         "timeFrame": f"{first.isoformat()}:{today.isoformat()}",
-        "groupBy": ["date", "inmobiAppId"],
+        "groupBy": ["date", "requestBundleId"],   # real requested site/app bundle
     }}
-    log(f"Requesting MTD report {first.isoformat()} → {today.isoformat()} (groupBy date+app)…")
+    log(f"Requesting MTD report {first.isoformat()} → {today.isoformat()} (groupBy date+requestBundleId)…")
     try:
         rr = requests.post(REPORT_URL,
                           headers={"Content-Type": "application/json", "Accept": "application/json",
@@ -244,9 +247,10 @@ def process_results(results: list) -> pd.DataFrame:
         if col not in df.columns:
             sys.exit(f"ERROR: expected field {col!r} missing from API response. "
                      f"Got: {list(df.columns)} — aborting to protect the sheet.")
-    # Domain: prefer bundleId (domain-like), fall back to app name, then id.
-    if "bundleId" not in df.columns:
-        df["bundleId"] = df.get("inmobiAppName", df.get("inmobiAppId", "inmobi"))
+    # Domain: use requestBundleId (the real requested site/app bundle), falling
+    # back to legacy site fields if ever absent.
+    if "requestBundleId" not in df.columns:
+        df["requestBundleId"] = df.get("siteName", df.get("bundleId", "inmobi"))
 
     df = df.dropna(subset=["date"])
     # Dates look like "2026-09-03 00:00:00" (GMT) — take the date part.
@@ -277,7 +281,7 @@ def process_results(results: list) -> pd.DataFrame:
 
     out = pd.DataFrame({
         "Date":        df["__date"].dt.strftime("%Y-%m-%d"),
-        "Domain":      df["bundleId"].astype(str).str.strip(),
+        "Domain":      df["requestBundleId"].astype(str).str.strip(),
         "Impressions": pd.to_numeric(df["adImpressions"], errors="coerce").fillna(0),
         "Revenue":     pd.to_numeric(df["earnings"], errors="coerce").fillna(0),
         "CPM":         0.0,   # recomputed from totals in _normalize_and_aggregate
