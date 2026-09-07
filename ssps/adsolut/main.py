@@ -217,13 +217,13 @@ def download_adsolut_csv(username: str, password: str) -> Path:
             browser.close()
             sys.exit(f"ERROR: Could not open Report Builder.\nDetail: {e}")
 
-        log("Setting date range = Month To Today…")
+        log("Setting date range = Last 30 days…")
         try:
             # The date-range area shows a date input like "28/05/26" — click it
             # to open the preset list.
             page.locator('text=/\\d{2}\\/\\d{2}\\/\\d{2}/').first.click()
             page.wait_for_timeout(1500)
-            page.locator(':text("Month To Today")').first.click()
+            page.get_by_text("Last 30 days", exact=True).first.click()
             page.wait_for_timeout(1000)
         except Exception as e:
             log(f"WARNING: date-range selector failed: {e}")
@@ -368,15 +368,11 @@ def process_csv(csv_path: Path) -> pd.DataFrame:
             f"Expected within {MAX_ALLOWED_AGE_DAYS} days — aborting."
         )
 
-    first_of_month = pd.Timestamp(datetime.now().replace(day=1).date())
-    _pre_mtd_df = df.copy()
-    before = len(df)
-    df = df[df["__date"] >= first_of_month]
-    if before != len(df):
-        log(f"Filtered to MTD ({first_of_month.date()} onward): kept {len(df)}, dropped {before - len(df)}.")
-    if df.empty:
-        log("WARNING: 0 rows match current-month filter — falling back to full report (likely a month-boundary day, MTD data not available yet).")
-        df = _pre_mtd_df
+    # Keep the FULL pulled window (Last 30 days) — do NOT MTD-filter, so the
+    # previous month's final day is refreshed once it is no longer "today"; the
+    # write step's per-(Domain, Date) dedup overwrites any frozen partial and
+    # older history is preserved. Fixes the month-boundary freeze.
+    log(f"Keeping full pulled window: {len(df)} rows.")
 
     out = pd.DataFrame({
         "Date":        df["__date"].dt.strftime("%Y-%m-%d"),

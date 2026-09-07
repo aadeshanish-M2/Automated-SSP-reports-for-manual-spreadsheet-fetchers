@@ -226,7 +226,7 @@ def download_kuantyx_csv(username: str, password: str) -> Path:
             browser.close()
             sys.exit(f"ERROR: Could not open Statistics.\nDetail: {e}")
 
-        log("Setting Group by = Day, Then by = Website, range = This Month…")
+        log("Setting Group by = Day, Then by = Website, range = Last 30 Days…")
         # Target the two group-by <select>s by their STABLE IDs (#group primary,
         # #group2 secondary). Kuantyx renamed the secondary label from
         # "Group by (extra)" to "Then by", which broke the old label-based
@@ -280,16 +280,16 @@ def download_kuantyx_csv(username: str, password: str) -> Path:
             page.wait_for_timeout(1000)
             page.evaluate("""() => {
                 const li = [...document.querySelectorAll('li[data-range-key]')]
-                    .find(e => (e.getAttribute('data-range-key')||'').trim().toLowerCase() === 'this month');
+                    .find(e => (e.getAttribute('data-range-key')||'').trim().toLowerCase() === 'last 30 days');
                 if (li) li.click();
             }""")
             page.wait_for_timeout(1200)
             label = page.locator('.kv-drp-dropdown .range-name').first.inner_text(timeout=5000)
-            log(f"  clicked 'This Month' preset (picker label reads {label!r} — "
-                "label is cosmetic/buggy; actual range verified from CSV dates below)")
+            log(f"  clicked 'Last 30 Days' preset (picker label reads {label!r}; "
+                "actual range verified from CSV dates below)")
         except PlaywrightTimeoutError as e:
             browser.close()
-            sys.exit(f"ERROR: Could not set date range to This Month.\nDetail: {e}")
+            sys.exit(f"ERROR: Could not set date range to Last 30 Days.\nDetail: {e}")
 
         log("Clicking Generate…")
         try:
@@ -377,16 +377,11 @@ def process_csv(csv_path: Path) -> pd.DataFrame:
             f"Expected within {MAX_ALLOWED_AGE_DAYS} days — aborting."
         )
 
-    # Defensive MTD filter (the dashboard preset is already "this month").
-    first_of_month = pd.Timestamp(datetime.now().replace(day=1).date())
-    _pre_mtd_df = df.copy()
-    before = len(df)
-    df = df[df["__date"] >= first_of_month]
-    if before != len(df):
-        log(f"Filtered to MTD ({first_of_month.date()} onward): kept {len(df)}, dropped {before - len(df)}.")
-    if df.empty:
-        log("WARNING: 0 rows match current-month filter — falling back to full report (likely a month-boundary day, MTD data not available yet).")
-        df = _pre_mtd_df
+    # Keep the FULL pulled window (Last 30 Days) — do NOT MTD-filter, so the
+    # previous month's final day is refreshed once it is no longer "today"; the
+    # write step's per-(Domain, Date) dedup overwrites any frozen partial and
+    # older history is preserved. Fixes the month-boundary freeze.
+    log(f"Keeping full pulled window: {len(df)} rows.")
 
     out = pd.DataFrame({
         "Date":        df["__date"].dt.strftime("%Y-%m-%d"),

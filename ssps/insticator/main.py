@@ -256,49 +256,23 @@ def download_insticator_csv(username: str, password: str) -> Path:
             browser.close()
             sys.exit(f"ERROR: Could not click Create New Report.\nDetail: {e}")
 
-        log("Setting custom date range (1st of month → latest enabled day)…")
-        # Insticator's Period dropdown has no MTD preset. Leave Period on
-        # its default "Custom" and explicitly pick 1st-of-month → latest
-        # selectable date (Insticator has a ~2-day reporting lag, so today
-        # and often yesterday are greyed out).
+        log("Setting Period = Last 30 Days…")
+        # Use the built-in "Last 30 Days" Period preset (a rolling window that
+        # spans the month boundary) instead of a Custom 1st-of-month → today
+        # range. This is both simpler than driving the calendar AND fixes the
+        # month-boundary freeze: the previous month's final day is refreshed
+        # once it's no longer "today" (the write step's per-(Domain, Date) dedup
+        # overwrites the frozen partial; older history is preserved).
         try:
-            from datetime import date, timedelta
-            today = date.today()
-            first = date(today.year, today.month, 1)
-
-            # Open the date-range field by clicking its visible value text.
-            page.locator(
-                'text=/\\w+ \\d+, \\d+ - \\w+ \\d+, \\d+/'
-            ).first.click(timeout=10_000)
+            # The Period control shows "Custom" by default — click it to open the
+            # preset list, then pick "Last 30 Days".
+            page.get_by_text("Custom", exact=True).first.click(timeout=10_000)
             page.wait_for_timeout(1500)
-
-            from_aria = first.strftime("%a %b %d %Y")
-            page.click(
-                f'.DayPicker-Day[aria-label="{from_aria}"][aria-disabled="false"]',
-                timeout=5000,
-            )
-            page.wait_for_timeout(400)
-
-            # Walk back from today until we find a clickable end-date cell.
-            end_clicked = None
-            for offset in range(0, 6):
-                cand = today - timedelta(days=offset)
-                if cand < first:
-                    break
-                aria = cand.strftime("%a %b %d %Y")
-                sel  = f'.DayPicker-Day[aria-label="{aria}"][aria-disabled="false"]'
-                if page.locator(sel).count() > 0:
-                    page.click(sel, timeout=3000)
-                    end_clicked = cand
-                    break
-            if end_clicked is None:
-                raise RuntimeError("no enabled end-date found in current month")
-            log(f"  date range: {first.isoformat()} → {end_clicked.isoformat()}")
-            page.wait_for_timeout(400)
-            page.locator('button:has-text("Apply")').first.click(timeout=5000)
+            page.get_by_text("Last 30 Days", exact=True).first.click(timeout=8000)
             page.wait_for_timeout(1500)
+            log("  Period set to Last 30 Days.")
         except Exception as e:
-            log(f"WARNING: date-range picker: {e}")
+            log(f"WARNING: Period selector: {e}")
 
         log("Checking dimension: Domain/App  (Day is pre-selected)…")
         try:
@@ -450,15 +424,11 @@ def process_csv(csv_path: Path) -> pd.DataFrame:
             f"Expected within {MAX_ALLOWED_AGE_DAYS} days — aborting."
         )
 
-    first_of_month = pd.Timestamp(datetime.now().replace(day=1).date())
-    _pre_mtd_df = df.copy()
-    before = len(df)
-    df = df[df["__date"] >= first_of_month]
-    if before != len(df):
-        log(f"Filtered to MTD ({first_of_month.date()} onward): kept {len(df)}, dropped {before - len(df)}.")
-    if df.empty:
-        log("WARNING: 0 rows match current-month filter — falling back to full report (likely a month-boundary day, MTD data not available yet).")
-        df = _pre_mtd_df
+    # Keep the FULL pulled window (Last 30 Days) — do NOT MTD-filter, so the
+    # previous month's final day is refreshed once it is no longer "today"; the
+    # write step's per-(Domain, Date) dedup overwrites any frozen partial and
+    # older history is preserved. Fixes the month-boundary freeze.
+    log(f"Keeping full pulled window: {len(df)} rows.")
 
     out = pd.DataFrame({
         "Date":        df["__date"].dt.strftime("%Y-%m-%d"),

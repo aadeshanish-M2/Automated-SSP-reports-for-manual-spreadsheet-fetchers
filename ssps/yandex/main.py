@@ -31,7 +31,7 @@ SHEET_NAME     = "Sheet1"
 SCOPES         = ["https://www.googleapis.com/auth/spreadsheets"]
 
 API_URL        = "https://partner.yandex.ru/api/statistics2/get.json"
-DATE_PERIOD    = "thismonth"      # MTD preset
+DATE_PERIOD    = "30days"         # rolling 30-day window (spans month boundary)
 IMPR_FIELD     = "impressions"
 REV_FIELD      = "partner_wo_nds"
 ECPM_FIELD     = "ecpm_partner_wo_nds"
@@ -236,13 +236,11 @@ def process_points(points: list[dict]) -> pd.DataFrame:
             f"Expected within {MAX_ALLOWED_AGE_DAYS} days — aborting."
         )
 
-    # Defensive MTD filter (the API preset is already "thismonth").
-    first_of_month = pd.Timestamp(datetime.now().replace(day=1).date())
-    _pre_mtd_df = df.copy()
-    before = len(df)
-    df = df[df["__date"] >= first_of_month]
-    if before != len(df):
-        log(f"Filtered to MTD ({first_of_month.date()} onward): kept {len(df)}, dropped {before - len(df)}.")
+    # Keep the FULL pulled window (period=30days) — do NOT MTD-filter, so the
+    # previous month's final day is refreshed once it is no longer "today"; the
+    # write step's per-(Domain, Date) dedup overwrites any frozen partial and
+    # older history is preserved. Fixes the month-boundary freeze.
+    log(f"Keeping full pulled window: {len(df)} rows.")
 
     out = pd.DataFrame({
         "Date":        df["__date"].dt.strftime("%Y-%m-%d"),

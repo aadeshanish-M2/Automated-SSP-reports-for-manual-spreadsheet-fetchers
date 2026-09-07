@@ -57,6 +57,7 @@ PUBLISHER_DOMAINS  = {
     "bestgames.com",           # publisher's www.bestgames.com
     "judgeiq.net",
     "movievibe.net",
+    "amuletslot.com",
 }
 
 

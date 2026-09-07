@@ -36,6 +36,7 @@ SSPS = [
     ("OptiDigital", SSPS_DIR / "optidigital"),
     ("Minute Media", SSPS_DIR / "minutemedia"),
     ("Taboola",    SSPS_DIR / "taboola"),
+    ("InMobi",     SSPS_DIR / "inmobi"),
     # Connatix runs last because its refresh can take 5+ min and we'd rather
     # not block the fast ones behind it.
     ("Connatix",   SSPS_DIR / "connatix"),

@@ -31,7 +31,7 @@ SHEET_NAME     = "Sheet1"
 SCOPES         = ["https://www.googleapis.com/auth/spreadsheets"]
 
 API_BASE       = "https://api.mgid.com/v2/pub/account"
-DATE_INTERVAL  = "thisMonth"      # MGID preset = month-to-date
+DATE_INTERVAL  = "last30Days"     # rolling 30-day window (spans month boundary)
 DIMENSIONS     = "date,website"
 # adCPC is needed to compute clicks = revenue / adCPC (MGID v2 doesn't expose
 # raw clicks). adCPM lets us populate the CPM column directly.
@@ -258,14 +258,11 @@ def process_rows(rows: list[dict]) -> pd.DataFrame:
             f"Expected within {MAX_ALLOWED_AGE_DAYS} days — aborting."
         )
 
-    # MGID's thisMonth preset already returns MTD, but defensively re-filter
-    # in case the preset behaviour ever shifts.
-    first_of_month = pd.Timestamp(datetime.now().replace(day=1).date())
-    _pre_mtd_df = df.copy()
-    before = len(df)
-    df = df[df["__date"] >= first_of_month]
-    if before != len(df):
-        log(f"Filtered to MTD ({first_of_month.date()} onward): kept {len(df)}, dropped {before - len(df)}.")
+    # Keep the FULL pulled window (last30Days) — do NOT MTD-filter, so the previous
+    # month's final day is refreshed once it is no longer "today"; the write step's
+    # per-(Domain, Date) dedup overwrites any frozen partial and older history is
+    # preserved. Fixes the month-boundary freeze.
+    log(f"Keeping full pulled window: {len(df)} rows.")
 
     revenue = pd.to_numeric(df[rev_col], errors="coerce").fillna(0)
     cpc     = pd.to_numeric(df[cpc_col], errors="coerce").fillna(0)
