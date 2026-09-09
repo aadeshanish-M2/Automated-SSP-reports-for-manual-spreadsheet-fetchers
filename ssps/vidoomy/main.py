@@ -253,11 +253,18 @@ def download_vidoomy_csv(username: str, password: str) -> Path:
 
         log("Logged in. Opening Stats Pro Reports…")
         try:
+            # no_wait_after: the click navigates to /stats_pro, whose SPA keeps
+            # long-poll connections open so the post-click navigation never
+            # "settles" — the click itself succeeds but Playwright's auto-wait
+            # would otherwise time out. We settle with an explicit wait + by
+            # waiting for the report UI ("Overall Report") to appear.
             page.locator(
                 'a:has-text("Stats Pro Reports"), button:has-text("Stats Pro Reports"), '
                 ':text("Stats Pro Reports")'
-            ).first.click()
-            page.wait_for_timeout(6000)
+            ).first.click(no_wait_after=True)
+            page.wait_for_timeout(4000)
+            page.wait_for_selector('button:has-text("Overall Report")', timeout=30_000)
+            page.wait_for_timeout(2000)
         except PlaywrightTimeoutError as e:
             browser.close()
             sys.exit(f"ERROR: Could not open Stats Pro Reports.\nDetail: {e}")
