@@ -22,7 +22,8 @@ API ref: Backstage API - Publisher Reports (revenue-summary).
 import json
 import os
 import sys
-from datetime import date, datetime
+import re
+from datetime import date, datetime, timedelta
 
 import pandas as pd
 import requests
@@ -42,18 +43,49 @@ SCOPES         = ["https://www.googleapis.com/auth/spreadsheets"]
 
 BACKSTAGE  = "https://backstage.taboola.com/backstage"
 TOKEN_URL  = f"{BACKSTAGE}/oauth/token"
-# Use the "day" dimension — the correctly-deduplicated daily total that matches
-# the Taboola dashboard. Do NOT use day_site_placement_breakdown: Taboola counts
-# 1 page view per page regardless of how many placements are on it, so summing
-# the per-placement rows multiplies page_views (and overlaps revenue) — it
-# produced ~3× page views / ~2× revenue vs the dashboard.
-DIMENSION  = "day"
-# The "day" dimension has no publisher column, and this account is a single
-# publisher, so we label every row with a fixed Domain.
-DOMAIN_LABEL = "Monetize More Reseller"
+ACCOUNTS_URL = f"{BACKSTAGE}/api/1.0/users/current/allowed-accounts/"
+# Per-site daily data: use the "site_breakdown" dimension, ONE call per day.
+#   • site_breakdown gives the correctly-deduplicated per-publisher totals whose
+#     sum equals the "day" dimension (verified). Do NOT use
+#     day_site_placement_breakdown — Taboola counts 1 page view per page
+#     regardless of placements, so summing per-placement rows multiplies page
+#     views (~3×) and overlaps revenue (~2×).
+#   • site_breakdown aggregates over the whole date range (no per-day column), so
+#     we loop day-by-day and tag each row with its date.
+DIMENSION = "site_breakdown"
+# The reseller sub-accounts are named "monetizemorereseller-<site>". Strip that
+# prefix to get the bare site key, then map it to the site's real domain (the
+# API exposes only the site name, not its TLD). Domains verified against the same
+# publishers in the other SSP sheets; mcqsworld was not found there so its TLD is
+# an unverified guess. Add new sites here as they appear (unmapped sites fall
+# through as their bare name and are flagged in the log).
+_SITE_PREFIX_RE = re.compile(r"(?i)^monetize\s*more\s*reseller\s*-\s*")
+SITE_DOMAIN_MAP = {
+    "cezicelumea":              "cezicelumea.ro",
+    "dasfinanzen":              "dasfinanzen.de",
+    "secretele":                "secretele.com",
+    "mcqsworld":                "mcqsworld.com",   # unverified TLD
+    "easymediterraneanrecipes": "easymediterraneanrecipes.blog",
+}
+
+def _clean_site(publisher: str) -> str:
+    name = _SITE_PREFIX_RE.sub("", str(publisher or "").strip()).lower()
+    if not name:
+        return "taboola"
+    return SITE_DOMAIN_MAP.get(name, name)
 
 MAX_ALLOWED_AGE_DAYS = 5
 HEADER = ["Domain", "Date", "Revenue", "Impression", "CPM"]
+
+# ── Migration cutover ─────────────────────────────────────────────────────────
+# Taboola migrated this account around early September. The NEW account only has
+# data from CUTOVER (2026-09-08) onward; the days before it (incl. the Aug 31–Sep 7
+# gap, which was inferred from the account manager's dashboard and written to the
+# sheet ONCE) are frozen history. The sync refreshes only dates >= CUTOVER and
+# preserves everything before it, so those fixed older rows are never touched
+# again. (Nothing else in this file depends on the specific value — it only gates
+# which current-month dates get refreshed.)
+CUTOVER = "2026-09-08"
 
 MONTH_START_GRACE_DAYS = 5
 
@@ -183,8 +215,7 @@ def load_service_account():
 
 # ── Step 1 — Fetch the report from the Taboola Backstage API ──────────────────
 
-def fetch_report(cfg: dict) -> list:
-    """OAuth2 client-credentials → GET the MTD revenue-summary report. Returns rows."""
+def _get_token(cfg: dict) -> str:
     log("Requesting OAuth2 token…")
     try:
         r = requests.post(
@@ -202,31 +233,75 @@ def fetch_report(cfg: dict) -> list:
     token = r.json().get("access_token")
     if not token:
         sys.exit(f"ERROR: no access_token in auth response: {r.text[:300]}")
+    return token
+
+
+def _network_account_id(token: str, fallback: str) -> str:
+    """Auto-discover the NETWORK account. Taboola renames these accounts (the
+    reseller network was renamed, 403-ing the old id), so we resolve the current
+    NETWORK-type account from the token's allowed accounts rather than trusting a
+    hard-coded id. Falls back to the configured id if discovery fails."""
+    try:
+        r = requests.get(ACCOUNTS_URL, headers={"Authorization": f"Bearer {token}"}, timeout=30)
+        if r.status_code == 200:
+            accts = r.json().get("results", [])
+            for a in accts:
+                if str(a.get("type", "")).upper() == "NETWORK" and a.get("account_id"):
+                    return a["account_id"]
+            # no NETWORK type — if the configured id is still allowed, keep it
+            ids = {a.get("account_id") for a in accts}
+            if fallback in ids:
+                return fallback
+            log(f"WARNING: no NETWORK account found; allowed: {sorted(i for i in ids if i)}")
+    except Exception as e:
+        log(f"WARNING: could not list allowed accounts ({str(e)[:60]}); using configured id.")
+    return fallback
+
+
+def fetch_report(cfg: dict) -> list:
+    """OAuth2 → resolve the network account → pull per-site data one day at a time."""
+    token = _get_token(cfg)
+    account = _network_account_id(token, cfg["taboola_account_id"])
+    log(f"Using network account: {account!r}")
 
     today = date.today()
     first = date(today.year, today.month, 1)
-    url = (f"{BACKSTAGE}/api/1.0/{cfg['taboola_account_id']}"
-           f"/reports/revenue-summary/dimensions/{DIMENSION}")
-    log(f"Requesting MTD report {first.isoformat()} → {today.isoformat()} ({DIMENSION})…")
-    try:
-        rr = requests.get(url,
-                          params={"start_date": first.isoformat(), "end_date": today.isoformat()},
-                          headers={"Authorization": f"Bearer {token}"}, timeout=90)
-    except Exception as e:
-        sys.exit(f"ERROR: report request failed to send.\nDetail: {e}")
-    if rr.status_code == 401:
-        sys.exit("ERROR: 401 unauthorized — Taboola token rejected. Check the "
-                 "client id/secret and that the account id is correct.")
-    if rr.status_code != 200:
-        sys.exit(f"ERROR: report request failed ({rr.status_code}): {rr.text[:300]}")
-    try:
-        data = rr.json()
-    except Exception as e:
-        sys.exit(f"ERROR: could not parse API JSON.\nDetail: {e}")
-    results = data.get("results") or []
-    log(f"API returned {len(results)} rows (currency: "
-        f"{results[0].get('currency') if results else '?'}, timezone: {data.get('timezone')}).")
-    return results
+    url = f"{BACKSTAGE}/api/1.0/{account}/reports/revenue-summary/dimensions/{DIMENSION}"
+    headers = {"Authorization": f"Bearer {token}"}
+    log(f"Pulling per-site data {first.isoformat()} → {today.isoformat()} "
+        f"(site_breakdown, one call per day)…")
+
+    rows, ok_days, forbidden = [], 0, 0
+    d = first
+    while d <= today:
+        ds = d.isoformat()
+        try:
+            rr = requests.get(url, params={"start_date": ds, "end_date": ds},
+                              headers=headers, timeout=60)
+            if rr.status_code == 200:
+                for row in (rr.json().get("results") or []):
+                    row["date"] = ds          # tag each site row with its day
+                    rows.append(row)
+                ok_days += 1
+            elif rr.status_code in (401, 403):
+                forbidden += 1
+                if forbidden <= 2:
+                    log(f"  {ds}: {rr.status_code} {rr.text[:100]}")
+            else:
+                log(f"  WARNING: {ds} site_breakdown {rr.status_code}: {rr.text[:120]}")
+        except Exception as e:
+            log(f"  WARNING: {ds} request failed: {str(e)[:80]}")
+        d += timedelta(days=1)
+
+    if ok_days == 0:
+        if forbidden:
+            sys.exit(f"ERROR: Taboola returned {forbidden}× 401/403 — the account "
+                     f"{account!r} is not accessible with these credentials "
+                     "(the account may have been renamed again). Aborting.")
+        sys.exit("ERROR: no days returned from Taboola site_breakdown — aborting.")
+    log(f"Collected {len(rows)} site-day rows over {ok_days} days "
+        f"(currency: {rows[0].get('currency') if rows else '?'}).")
+    return rows
 
 
 # ── Step 2 — Validate & shape ─────────────────────────────────────────────────
@@ -241,10 +316,13 @@ def process_results(results: list) -> pd.DataFrame:
         if col not in df.columns:
             sys.exit(f"ERROR: expected field {col!r} missing from API response. "
                      f"Got: {list(df.columns)} — aborting to protect the sheet.")
-    # "day" dimension has no publisher column → use the fixed label. (If a
-    # publisher-broken-down dimension is ever used, honour its publisher_name.)
-    if "publisher_name" not in df.columns:
-        df["publisher_name"] = DOMAIN_LABEL
+    # Domain = the site, from the publisher slug with the reseller prefix stripped
+    # (e.g. "monetizemorereseller-cezicelumea" → "cezicelumea").
+    _pub = df["publisher"] if "publisher" in df.columns else df.get("publisher_name", "taboola")
+    df["__site"] = _pub.apply(_clean_site)
+    _unmapped = sorted({s for s in df["__site"] if "." not in str(s) and s != "taboola"})
+    if _unmapped:
+        log(f"WARNING: sites with no real-domain mapping (add to SITE_DOMAIN_MAP): {_unmapped}")
 
     df = df.dropna(subset=["date"])
     # Taboola dates look like "2026-08-30 00:00:00.0" — take the date part.
@@ -275,7 +353,7 @@ def process_results(results: list) -> pd.DataFrame:
 
     out = pd.DataFrame({
         "Date":        df["__date"].dt.strftime("%Y-%m-%d"),
-        "Domain":      df["publisher_name"].astype(str).str.strip(),
+        "Domain":      df["__site"].astype(str).str.strip(),
         "Impressions": pd.to_numeric(df["page_views"], errors="coerce").fillna(0),
         "Revenue":     pd.to_numeric(df["ad_revenue"], errors="coerce").fillna(0),
         "CPM":         0.0,   # recomputed from totals in _normalize_and_aggregate
@@ -319,6 +397,11 @@ def write_sheet(df: pd.DataFrame, creds) -> None:
         for _, r in df.iterrows()
     ]
     rows = _normalize_and_aggregate(rows)
+    # The new account only has data from CUTOVER onward; the days before it
+    # (the Aug 31–Sep 7 migration gap, inferred once and written to the sheet)
+    # must NOT be refreshed away. So the live pull only contributes dates >=
+    # CUTOVER, and the preserve step freezes everything before it.
+    rows = [r for r in rows if len(r) >= 2 and str(r[1]).strip() >= CUTOVER]
     rows.sort(key=lambda r: (r[0], r[1]))
     rows.sort(key=lambda r: r[1], reverse=True)
 
@@ -330,7 +413,10 @@ def write_sheet(df: pd.DataFrame, creds) -> None:
     for _r in existing:
         if not _r or _r == HEADER:
             continue
-        if len(_r) >= 2 and str(_r[1]).strip().startswith(current_month):
+        _d = str(_r[1]).strip() if len(_r) >= 2 else ""
+        # Refresh only current-month dates on/after the cutover; preserve
+        # everything else (all prior months + the frozen pre-cutover gap rows).
+        if _d.startswith(current_month) and _d >= CUTOVER:
             continue
         preserved.append(_r)
 
