@@ -53,16 +53,15 @@ ACCOUNTS_URL = f"{BACKSTAGE}/api/1.0/users/current/allowed-accounts/"
 #   • site_breakdown aggregates over the whole date range (no per-day column), so
 #     we loop day-by-day and tag each row with its date.
 DIMENSION = "site_breakdown"
-# The reseller sub-accounts are named "monetizemorereseller-<site>". Strip that
-# prefix to get the bare site key, then map it to the site's real domain (the
-# API exposes only the site name, not its TLD). Domains verified against the same
-# publishers in the other SSP sheets; mcqsworld was not found there so its TLD is
-# an unverified guess. Add new sites here as they appear (unmapped sites fall
-# through as their bare name and are flagged in the log).
+# The site comes from publisher_name, which Taboola now suffixes with the real
+# TLD (e.g. "Monetize More Reseller - Cezicelumea.ro"). Strip the reseller prefix
+# to get the site: if it already has a TLD (contains "."), use it directly — no
+# lookup needed. The map is only a FALLBACK for sites Taboola hasn't suffixed yet
+# (secretele/mcqsworld/easymediterraneanrecipes); once those are suffixed too, the
+# map becomes dead weight. Unmapped, un-suffixed sites fall through as their bare
+# name and are flagged in the log.
 _SITE_PREFIX_RE = re.compile(r"(?i)^monetize\s*more\s*reseller\s*-\s*")
 SITE_DOMAIN_MAP = {
-    "cezicelumea":              "cezicelumea.ro",
-    "dasfinanzen":              "dasfinanzen.de",
     "secretele":                "secretele.com",
     "mcqsworld":                "mcqsworld.com",   # unverified TLD
     "easymediterraneanrecipes": "easymediterraneanrecipes.blog",
@@ -72,19 +71,21 @@ def _clean_site(publisher: str) -> str:
     name = _SITE_PREFIX_RE.sub("", str(publisher or "").strip()).lower()
     if not name:
         return "taboola"
-    return SITE_DOMAIN_MAP.get(name, name)
+    if "." in name:                       # Taboola already included the real TLD
+        return name
+    return SITE_DOMAIN_MAP.get(name, name)   # fallback for not-yet-suffixed sites
 
 MAX_ALLOWED_AGE_DAYS = 5
 HEADER = ["Domain", "Date", "Revenue", "Impression", "CPM"]
 
 # ── Migration cutover ─────────────────────────────────────────────────────────
-# Taboola migrated this account around early September. The NEW account only has
-# data from CUTOVER (2026-09-08) onward; the days before it (incl. the Aug 31–Sep 7
-# gap, which was inferred from the account manager's dashboard and written to the
-# sheet ONCE) are frozen history. The sync refreshes only dates >= CUTOVER and
-# preserves everything before it, so those fixed older rows are never touched
-# again. (Nothing else in this file depends on the specific value — it only gates
-# which current-month dates get refreshed.)
+# Taboola migrated this account in early September. Going forward the NEW account
+# (USD, per-site) is the source; the days BEFORE CUTOVER (2026-09-08) come from
+# the OLD account (CAD), which reports a single aggregate site — those rows were
+# pulled once, converted CAD→USD, and written to the sheet as frozen history. The
+# sync refreshes only dates >= CUTOVER and preserves everything before it, so the
+# old-account rows are never touched again. (Nothing else depends on the specific
+# value — it only gates which current-month dates get refreshed.)
 CUTOVER = "2026-09-08"
 
 MONTH_START_GRACE_DAYS = 5
@@ -236,26 +237,35 @@ def _get_token(cfg: dict) -> str:
     return token
 
 
-def _network_account_id(token: str, fallback: str) -> str:
-    """Auto-discover the NETWORK account. Taboola renames these accounts (the
-    reseller network was renamed, 403-ing the old id), so we resolve the current
-    NETWORK-type account from the token's allowed accounts rather than trusting a
-    hard-coded id. Falls back to the configured id if discovery fails."""
+OLD_NETWORK_ACCOUNT = "monetizemorereseller-network"   # dead/wound-down; never pick it
+
+def _network_account_id(token: str, configured: str) -> str:
+    """Resolve the account to pull. PREFER the configured id — it's the correct
+    (new) network. Only auto-discover a NETWORK account if the configured id is no
+    longer accessible (Taboola renames accounts, which 403s the old id). NOTE: the
+    old reseller network is now accessible AGAIN and is also type NETWORK, so a
+    blind 'first NETWORK' pick would grab the wrong (old, CAD) account — hence
+    configured-first, and the old account is explicitly avoided in the fallback."""
     try:
         r = requests.get(ACCOUNTS_URL, headers={"Authorization": f"Bearer {token}"}, timeout=30)
         if r.status_code == 200:
             accts = r.json().get("results", [])
-            for a in accts:
-                if str(a.get("type", "")).upper() == "NETWORK" and a.get("account_id"):
-                    return a["account_id"]
-            # no NETWORK type — if the configured id is still allowed, keep it
-            ids = {a.get("account_id") for a in accts}
-            if fallback in ids:
-                return fallback
-            log(f"WARNING: no NETWORK account found; allowed: {sorted(i for i in ids if i)}")
+            ids = {a.get("account_id") for a in accts if a.get("account_id")}
+            if configured in ids:
+                return configured
+            # configured id was renamed/revoked → pick a NETWORK account, avoiding
+            # the old wound-down one.
+            networks = [a["account_id"] for a in accts
+                        if str(a.get("type", "")).upper() == "NETWORK" and a.get("account_id")]
+            for nid in networks:
+                if nid != OLD_NETWORK_ACCOUNT:
+                    return nid
+            if networks:
+                return networks[0]
+            log(f"WARNING: no NETWORK account found; allowed: {sorted(ids)}")
     except Exception as e:
         log(f"WARNING: could not list allowed accounts ({str(e)[:60]}); using configured id.")
-    return fallback
+    return configured
 
 
 def fetch_report(cfg: dict) -> list:
@@ -318,7 +328,9 @@ def process_results(results: list) -> pd.DataFrame:
                      f"Got: {list(df.columns)} — aborting to protect the sheet.")
     # Domain = the site, from the publisher slug with the reseller prefix stripped
     # (e.g. "monetizemorereseller-cezicelumea" → "cezicelumea").
-    _pub = df["publisher"] if "publisher" in df.columns else df.get("publisher_name", "taboola")
+    # Prefer publisher_name — Taboola suffixes it with the real TLD; the slug
+    # (publisher) does not.
+    _pub = df["publisher_name"] if "publisher_name" in df.columns else df.get("publisher", "taboola")
     df["__site"] = _pub.apply(_clean_site)
     _unmapped = sorted({s for s in df["__site"] if "." not in str(s) and s != "taboola"})
     if _unmapped:
