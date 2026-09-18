@@ -383,11 +383,20 @@ def process_csv(csv_path: Path) -> pd.DataFrame:
 
     newest = df["__date"].max()
     age_days = (datetime.now() - newest).days
-    if age_days > MAX_ALLOWED_AGE_DAYS:
+    # The Save & Run + timestamp-change check above already proves the report
+    # regenerated, so this guard's remaining job is to catch a report stuck on a
+    # PREVIOUS month. Connatix's own data can legitimately lag several days behind
+    # today, so as long as the newest date is still in the CURRENT month, write
+    # what's available with a warning rather than failing the sync every day.
+    newest_in_current_month = newest.strftime("%Y-%m") == datetime.now().strftime("%Y-%m")
+    if age_days > MAX_ALLOWED_AGE_DAYS and not newest_in_current_month:
         sys.exit(
-            f"ERROR: Newest date is {newest.date()} ({age_days} days ago). "
-            f"Expected within {MAX_ALLOWED_AGE_DAYS} days — aborting."
+            f"ERROR: Newest date is {newest.date()} ({age_days} days ago) and is "
+            f"outside the current month — report looks stuck, aborting."
         )
+    if age_days > MAX_ALLOWED_AGE_DAYS:
+        log(f"WARNING: newest date {newest.date()} is {age_days} days old but within "
+            "the current month — Connatix data is lagging. Writing available data.")
 
     first_of_month = pd.Timestamp(datetime.now().replace(day=1).date())
     _pre_mtd_df = df.copy()
