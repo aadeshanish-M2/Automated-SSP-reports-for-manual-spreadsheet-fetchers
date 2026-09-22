@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """
-InMobi (Reporting API) → Google Sheets daily sync.
+InMobi (Reporting API) → Google Sheets daily sync.  [SERVER-SIDE / S2S HB]
+
+This InMobi account is a pure server-side (S2S header-bidding) integration, so
+all revenue is written net of a 7% service-provider fee (see SERVER_SIDE_FEE);
+CPM is recomputed from the reduced revenue and drops the same 7%.
 
 Pure API integration — no browser. Generates a session (GET, despite the docs
 calling it POST — the sample curl has no -X POST/body), then POSTs a month-to-date
@@ -52,6 +56,14 @@ REPORT_URL  = "https://api.inmobi.com/v3.0/reporting/publisher"
 
 MAX_ALLOWED_AGE_DAYS = 5
 HEADER = ["Domain", "Date", "Revenue", "Impression", "CPM"]
+
+# This InMobi account is a pure server-side (S2S header-bidding) integration.
+# Server-side bidding carries a 7% service-provider fee that must be deducted
+# from the publisher-net revenue we report. Revenue is written net of the fee;
+# CPM (= revenue/impressions*1000) drops by the same 7% automatically since it is
+# recomputed from the reduced revenue. Configurable per the server/client-side
+# convention — override with INMOBI_SERVER_SIDE_FEE if the fee ever changes.
+SERVER_SIDE_FEE = float(os.environ.get("INMOBI_SERVER_SIDE_FEE") or 0.07)
 
 MONTH_START_GRACE_DAYS = 5
 
@@ -107,6 +119,8 @@ def _normalize_and_aggregate(rows):
             rev = float(str(r[2]).lstrip("$").replace(",", ""))
         except Exception:
             rev = 0.0
+        # Server-side fee: report revenue net of the 7% service-provider fee.
+        rev *= (1 - SERVER_SIDE_FEE)
         try:
             imp = int(float(str(r[3])))
         except Exception:
