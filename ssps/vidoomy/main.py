@@ -222,6 +222,41 @@ def clean_european_number(v) -> float:
 
 # ── Step 1 — Drive the dashboard via Playwright ───────────────────────────────
 
+def _open_stats_pro(page) -> None:
+    """
+    Open the Stats Pro report page robustly.
+
+    The Stats Pro SPA holds long-poll connections open, so the page never fires
+    load/domcontentloaded and even goto's "commit" event can stall intermittently
+    (seen on the scheduled cloud runs). We therefore: (1) try goto(commit) with a
+    generous timeout; (2) if that stalls, trigger the navigation from JS instead
+    (which doesn't wait on Playwright's navigation lifecycle at all); and (3) treat
+    success as the report UI ("Overall Report") becoming visible — not as goto
+    returning. The whole thing is retried once. Clicking the sidebar link is NOT
+    used: after a menu redesign that click no longer triggers SPA navigation.
+    """
+    last_err = None
+    for attempt in (1, 2):
+        try:
+            page.goto(STATS_PRO_URL, wait_until="commit", timeout=45_000)
+        except PlaywrightTimeoutError:
+            log(f"  goto(commit) stalled (attempt {attempt}); triggering JS navigation…")
+            try:
+                page.evaluate("u => window.location.assign(u)", STATS_PRO_URL)
+            except Exception:
+                pass  # navigation destroys the JS execution context — expected
+        try:
+            page.wait_for_timeout(3000)
+            page.wait_for_selector('button:has-text("Overall Report")', timeout=45_000)
+            page.wait_for_timeout(2000)
+            return
+        except PlaywrightTimeoutError as e:
+            last_err = e
+            if attempt == 1:
+                log("  report UI not visible yet; retrying navigation…")
+    raise last_err
+
+
 def download_vidoomy_csv(username: str, password: str) -> Path:
     log("Launching browser…")
     with sync_playwright() as p:
@@ -254,17 +289,7 @@ def download_vidoomy_csv(username: str, password: str) -> Path:
 
         log("Logged in. Opening Stats Pro Reports…")
         try:
-            # Navigate directly to /stats_pro rather than clicking the sidebar link:
-            # the menu link's click stopped triggering SPA navigation after a menu
-            # redesign (it would leave us on /monetization/). A direct goto is
-            # robust to menu changes. The Stats Pro SPA keeps long-poll connections
-            # open so the page never fires "load"/"domcontentloaded" — use
-            # wait_until="commit" (fires as soon as the navigation is committed),
-            # then settle by waiting for the report UI ("Overall Report") to appear.
-            page.goto(STATS_PRO_URL, wait_until="commit")
-            page.wait_for_timeout(4000)
-            page.wait_for_selector('button:has-text("Overall Report")', timeout=30_000)
-            page.wait_for_timeout(2000)
+            _open_stats_pro(page)
         except PlaywrightTimeoutError as e:
             browser.close()
             sys.exit(f"ERROR: Could not open Stats Pro Reports.\nDetail: {e}")
