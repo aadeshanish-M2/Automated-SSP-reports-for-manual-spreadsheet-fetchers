@@ -29,6 +29,7 @@ SHEET_NAME     = "Sheet1"
 SCOPES         = ["https://www.googleapis.com/auth/spreadsheets"]
 
 LOGIN_URL = "https://login.vidoomy.com/"
+STATS_PRO_URL = "https://login.vidoomy.com/stats_pro"
 
 DATE_COL_CANDIDATES = ["Date", "Day", "date", "day"]
 SITE_COL_CANDIDATES = ["Site Url", "Site URL", "Site", "Domain", "Website", "site"]
@@ -253,15 +254,14 @@ def download_vidoomy_csv(username: str, password: str) -> Path:
 
         log("Logged in. Opening Stats Pro Reports…")
         try:
-            # no_wait_after: the click navigates to /stats_pro, whose SPA keeps
-            # long-poll connections open so the post-click navigation never
-            # "settles" — the click itself succeeds but Playwright's auto-wait
-            # would otherwise time out. We settle with an explicit wait + by
-            # waiting for the report UI ("Overall Report") to appear.
-            page.locator(
-                'a:has-text("Stats Pro Reports"), button:has-text("Stats Pro Reports"), '
-                ':text("Stats Pro Reports")'
-            ).first.click(no_wait_after=True)
+            # Navigate directly to /stats_pro rather than clicking the sidebar link:
+            # the menu link's click stopped triggering SPA navigation after a menu
+            # redesign (it would leave us on /monetization/). A direct goto is
+            # robust to menu changes. The Stats Pro SPA keeps long-poll connections
+            # open so the page never fires "load"/"domcontentloaded" — use
+            # wait_until="commit" (fires as soon as the navigation is committed),
+            # then settle by waiting for the report UI ("Overall Report") to appear.
+            page.goto(STATS_PRO_URL, wait_until="commit")
             page.wait_for_timeout(4000)
             page.wait_for_selector('button:has-text("Overall Report")', timeout=30_000)
             page.wait_for_timeout(2000)

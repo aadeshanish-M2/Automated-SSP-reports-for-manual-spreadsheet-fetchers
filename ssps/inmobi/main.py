@@ -65,6 +65,15 @@ HEADER = ["Domain", "Date", "Revenue", "Impression", "CPM"]
 # convention — override with INMOBI_SERVER_SIDE_FEE if the fee ever changes.
 SERVER_SIDE_FEE = float(os.environ.get("INMOBI_SERVER_SIDE_FEE") or 0.07)
 
+# Revenue column display format: min 2 decimals, up to 6 shown ($17.91, $0.28086,
+# $0.000186). We stamp this on the revenue column after every write because
+# values().update() with a "$"-prefixed string makes Sheets auto-apply a sticky
+# currency format matching that string's decimal count — which would truncate the
+# display of full-precision values on the next run. Stored values stay full
+# precision regardless; this only governs what's shown.
+REVENUE_COL_INDEX     = 2   # 0-based: Domain=0, Date=1, Revenue=2
+REVENUE_NUMBER_FORMAT = '"$"#,##0.00####'
+
 MONTH_START_GRACE_DAYS = 5
 
 
@@ -77,6 +86,29 @@ def _empty_data_exit(reason: str) -> None:
             "Skipping this run.")
         sys.exit(0)
     sys.exit(f"ERROR: {reason} — aborting.")
+
+
+def _fmt_money(v) -> str:
+    """
+    Format a dollar value with up to 6 decimals (trailing zeros trimmed, min 2 dp)
+    instead of a flat 2 dp. At sub-cent daily revenues — and especially after the
+    ×0.93 server-side fee, which produces long decimals — rounding each row to 2 dp
+    would shift it by up to half a cent, and those per-row errors accumulate when
+    many days/domains are summed. 6 dp keeps every stored value effectively lossless
+    while staying readable (e.g. $17.91, $0.0186, $0.000186).
+    """
+    try:
+        v = float(v)
+    except Exception:
+        v = 0.0
+    s = f"{v:.6f}"
+    if "." in s:
+        intp, frac = s.split(".")
+        frac = frac.rstrip("0")
+        if len(frac) < 2:
+            frac = (frac + "00")[:2]
+        s = f"{intp}.{frac}"
+    return f"${s}"
 
 
 def _normalize_and_aggregate(rows):
@@ -134,8 +166,8 @@ def _normalize_and_aggregate(rows):
 
     new_rows = []
     for (domain, date_), v in bucket.items():
-        cpm = round(v["rev"] / v["imp"] * 1000, 4) if v["imp"] > 0 else 0.0
-        new_rows.append([domain, date_, f"${v['rev']:.2f}", v["imp"], cpm])
+        cpm = round(v["rev"] / v["imp"] * 1000, 6) if v["imp"] > 0 else 0.0
+        new_rows.append([domain, date_, _fmt_money(v["rev"]), v["imp"], cpm])
     return new_rows
 
 
@@ -317,11 +349,14 @@ def write_sheet(df: pd.DataFrame, creds) -> None:
     log("Connecting to Google Sheets…")
     service = build("sheets", "v4", credentials=creds, cache_discovery=False)
 
+    _sheet_id = 0
     try:
         _meta = service.spreadsheets().get(
-            spreadsheetId=SPREADSHEET_ID, fields="sheets.properties.title"
+            spreadsheetId=SPREADSHEET_ID, fields="sheets.properties(title,sheetId)"
         ).execute()
-        _tab = _meta["sheets"][0]["properties"]["title"]
+        _props = _meta["sheets"][0]["properties"]
+        _tab = _props["title"]
+        _sheet_id = _props["sheetId"]
     except Exception:
         _tab = SHEET_NAME
     log(f"Using sheet tab: {_tab!r}")
@@ -330,7 +365,7 @@ def write_sheet(df: pd.DataFrame, creds) -> None:
         [
             str(r["Domain"]).strip(),
             str(r["Date"]).strip(),
-            f"${float(pd.to_numeric(r['Revenue'], errors='coerce') or 0):.2f}",
+            _fmt_money(pd.to_numeric(r["Revenue"], errors="coerce") or 0),
             int(pd.to_numeric(r["Impressions"], errors="coerce") or 0),
             float(pd.to_numeric(r["CPM"], errors="coerce") or 0),
         ]
@@ -390,6 +425,29 @@ def write_sheet(df: pd.DataFrame, creds) -> None:
         valueInputOption="USER_ENTERED",
         body={"values": final_rows},
     ).execute()
+
+    # Stamp the adaptive revenue number format on every data row so full precision
+    # is visible (overrides the sticky currency format values().update() applies).
+    # Sized to exactly the rows just written — every run reformats all its own rows,
+    # so new rows are always covered as the month grows.
+    try:
+        fmt_rows = [
+            {"values": [{"userEnteredFormat": {"numberFormat": {
+                "type": "NUMBER", "pattern": REVENUE_NUMBER_FORMAT}}}]}
+            for _ in range(len(merged))
+        ]
+        service.spreadsheets().batchUpdate(
+            spreadsheetId=SPREADSHEET_ID,
+            body={"requests": [{"updateCells": {
+                "start": {"sheetId": _sheet_id, "rowIndex": 1,
+                          "columnIndex": REVENUE_COL_INDEX},
+                "rows": fmt_rows,
+                "fields": "userEnteredFormat.numberFormat",
+            }}]},
+        ).execute()
+    except Exception as e:
+        log(f"WARNING: could not stamp revenue number format (display only): {e}")
+
     log("Sheet updated successfully.")
 
 
