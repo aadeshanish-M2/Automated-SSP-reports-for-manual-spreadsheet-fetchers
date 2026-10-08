@@ -334,12 +334,28 @@ def download_vidoomy_csv(username: str, password: str) -> Path:
         except Exception as e:
             log(f"WARNING: CPM metric click failed: {e}")
 
+        log("Running report (required before CSV export is enabled)…")
+        try:
+            # The report no longer auto-runs on parameter change: you must click
+            # "Run report" to generate the table, and only then does the CSV export
+            # button (#run-csv) lose its aria-disabled="true" state. We click Run
+            # report (if present) and then wait for #run-csv to become enabled —
+            # the authoritative signal that results are loaded and exportable.
+            rr = page.locator('button:has-text("Run report")')
+            if rr.count():
+                rr.first.click(timeout=10_000)
+            page.wait_for_selector('#run-csv:not([aria-disabled="true"])', timeout=90_000)
+            page.wait_for_timeout(500)
+        except PlaywrightTimeoutError as e:
+            browser.close()
+            sys.exit("ERROR: Report did not finish / CSV export stayed disabled.\n"
+                     f"Detail: {e}")
+
         log("Clicking 'Run to CSV' to trigger download…")
         try:
             with page.expect_download(timeout=120_000) as dl_info:
                 page.locator(
-                    'button:has-text("Run to CSV"), a:has-text("Run to CSV"), '
-                    'button:has-text("Run"):has-text("CSV")'
+                    '#run-csv, button:has-text("Run to CSV"), a:has-text("Run to CSV")'
                 ).first.click(timeout=10_000)
             download = dl_info.value
         except PlaywrightTimeoutError as e:
