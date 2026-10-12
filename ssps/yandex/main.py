@@ -13,6 +13,7 @@ untouched.
 import json
 import os
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -174,8 +175,44 @@ def fetch_report(token: str) -> list[dict]:
         ("limit", "10000"),
     ]
     headers = {"Authorization": f"OAuth {token}"}
-    r = requests.get(API_URL, params=params, headers=headers, timeout=60)
-    if r.status_code != 200:
+
+    # Retry on 5xx / connection errors with exponential backoff. The Yandex
+    # partner portal intermittently returns a bare edge-level "503 Service
+    # unavailable" (whole host, not just this endpoint) — usually a transient
+    # Yandex-side blip. Retrying lets a brief outage self-heal; a sustained one
+    # exits with a clear message and leaves the sheet untouched.
+    attempts = 4
+    r = None
+    for i in range(1, attempts + 1):
+        try:
+            r = requests.get(API_URL, params=params, headers=headers, timeout=60)
+        except requests.RequestException as e:
+            if i == attempts:
+                sys.exit(
+                    f"ERROR: Could not reach the Yandex partner API after {attempts} "
+                    f"attempts (connection error: {e}). This is a Yandex-side "
+                    "availability issue, not a problem with the sync or credentials. "
+                    "The sheet was left unchanged; it should recover on a later run."
+                )
+            log(f"  attempt {i}/{attempts}: connection error ({e}); retrying…")
+            time.sleep(min(2 ** i, 20))
+            continue
+        if r.status_code == 200:
+            break
+        if 500 <= r.status_code < 600:
+            if i == attempts:
+                sys.exit(
+                    f"ERROR: Yandex partner API unavailable — HTTP {r.status_code} after "
+                    f"{attempts} attempts ({r.text[:120].strip()!r}). The partner.yandex.ru "
+                    "portal is returning server errors for every request, so this is a "
+                    "Yandex-side outage, not a problem with the sync, endpoint, or "
+                    "credentials. The sheet was left unchanged; it should recover on a "
+                    "later run once Yandex is back."
+                )
+            log(f"  attempt {i}/{attempts}: HTTP {r.status_code} from Yandex; retrying…")
+            time.sleep(min(2 ** i, 20))
+            continue
+        # 4xx or other non-retryable status → report immediately.
         sys.exit(f"ERROR: Yandex API failed ({r.status_code}): {r.text[:400]}")
     try:
         data = r.json()

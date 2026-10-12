@@ -2,25 +2,36 @@
 """
 Rich Audience (platform.richaudience.com) → Google Sheets daily sync.
 
-Logs in via Playwright, opens Reports → Reporting Tool (Global Report),
-selects the "Current month" date preset, adds Site + Date dimensions,
-runs Search, exports CSV, and syncs to the destination sheet in the uniform
-format (Domain | Date | Revenue | Impression | CPM). Previous-month history
-in the sheet is preserved; only current-month rows are refreshed.
+Pure API integration — no browser. Authenticates against the platform's standard
+login form with `requests` (GET the login page for the CSRF token, POST the
+credentials to get a PHP session), then calls the Global Report's own JSON
+endpoint (/report/global/pbd/get-report) that the dashboard itself uses, and
+syncs to the destination sheet in the uniform format
+(Domain | Date | Revenue | Impression | CPM). Previous-month history in the sheet
+is preserved; only current-month rows are refreshed.
+
+This replaced a brittle Playwright flow (the reporting UI kept changing: menus,
+selectize date presets, a new 2FA security modal, a required "Run report" click).
+Driving the JSON API directly removes all of that UI surface.
+
+NOTE: Rich Audience announced it will enforce two-factor auth (an emailed one-time
+code) at login. When that lands, password-only sign-in stops working and the login
+step here must be extended to supply the OTP — fetch_report() detects the challenge
+and exits with a clear message rather than failing cryptically.
 """
 
 import json
 import os
+import re
 import sys
-import tempfile
-from datetime import date, datetime
-from io import StringIO
+import time
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
+import requests
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
-from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
@@ -31,16 +42,13 @@ SPREADSHEET_ID = os.environ.get("SHEETS_SPREADSHEET_ID") or "1xDRYSjZm9hO5tAnAVx
 SHEET_NAME     = "Sheet1"
 SCOPES         = ["https://www.googleapis.com/auth/spreadsheets"]
 
-LOGIN_URL  = "https://platform.richaudience.com/"
-REPORT_URL = "https://platform.richaudience.com/report/global"
-
-# CSV headers (confirmed):
-# Site,Date,Gross Requests,Requests,Impressions,Clicks,CTR,Revenue,eCPM
-DATE_COL_CANDIDATES = ["Date", "date", "Day"]
-SITE_COL_CANDIDATES = ["Site", "site", "Domain"]
-IMPR_COL_CANDIDATES = ["Impressions", "impressions"]
-REV_COL_CANDIDATES  = ["Revenue", "revenue"]
-ECPM_COL_CANDIDATES = ["eCPM", "CPM", "ecpm"]
+LOGIN_PAGE     = "https://platform.richaudience.com/login"
+REPORT_PAGE    = "https://platform.richaudience.com/report/global"
+GET_REPORT_URL = "https://platform.richaudience.com/report/global/pbd/get-report"
+# Rolling window pulled from the API. write_sheet still keeps only current-month
+# rows fresh and preserves older history, so a 30-day pull spans the month boundary
+# without ever overwriting prior-month data.
+REPORT_DAYS    = 30
 
 # Rich Audience reports low-volume accounts with a genuine multi-day lag — the
 # "Current month" range is requested correctly (verified: Start=1st, End=today),
@@ -188,154 +196,147 @@ def load_service_account():
     return service_account.Credentials.from_service_account_file(str(SA_PATH), scopes=SCOPES)
 
 
-def first_matching_column(df_cols, candidates):
-    norm = {c.strip().lower(): c for c in df_cols}
-    for cand in candidates:
-        if cand.strip().lower() in norm:
-            return norm[cand.strip().lower()]
+# ── Step 1 — Fetch the report via the platform's JSON API ─────────────────────
+
+def _new_session() -> requests.Session:
+    s = requests.Session()
+    s.headers.update({
+        "User-Agent": ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                       "AppleWebKit/537.36 (KHTML, like Gecko) "
+                       "Chrome/124.0.0.0 Safari/537.36"),
+        "Accept": "text/html,application/json,*/*",
+    })
+    return s
+
+
+def _extract_csrf(html: str):
+    """Yii2 renders the CSRF token both as a <meta> tag and a hidden form input."""
+    for pat in (
+        r'<meta name="csrf-token" content="([^"]+)"',
+        r'name="_csrf"[^>]*value="([^"]+)"',
+        r'value="([^"]+)"[^>]*name="_csrf"',
+    ):
+        m = re.search(pat, html)
+        if m:
+            return m.group(1)
     return None
 
 
-# ── Step 1 — Drive the dashboard via Playwright ───────────────────────────────
+def _looks_like_otp_challenge(text: str) -> bool:
+    t = (text or "").lower()
+    return any(n in t for n in (
+        "one-time password", "one time password", "verification code",
+        "two-factor", "two factor", "2fa", "authentication code",
+        "enter the code", "código", "otp",
+    ))
 
-def download_richaudience_csv(username: str, password: str) -> Path:
-    log("Launching browser…")
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        context = browser.new_context(
-            viewport={"width": 1700, "height": 1100},
-            accept_downloads=True,
+
+def _request_with_retry(sess, method, url, **kw):
+    """GET/POST with exponential backoff on 5xx and connection errors."""
+    attempts = 4
+    kw.setdefault("timeout", 60)
+    r = None
+    for i in range(1, attempts + 1):
+        try:
+            r = sess.request(method, url, **kw)
+        except requests.RequestException as e:
+            if i == attempts:
+                sys.exit(f"ERROR: Rich Audience request failed (connection error: {e}). "
+                         "Likely a temporary network/platform issue; sheet left unchanged.")
+            log(f"  attempt {i}/{attempts}: connection error ({e}); retrying…")
+            time.sleep(min(2 ** i, 20))
+            continue
+        if r.status_code < 500:
+            return r
+        if i == attempts:
+            sys.exit(f"ERROR: Rich Audience returned HTTP {r.status_code} after {attempts} "
+                     "attempts — a platform-side server error, not the sync. Sheet left unchanged.")
+        log(f"  attempt {i}/{attempts}: HTTP {r.status_code}; retrying…")
+        time.sleep(min(2 ** i, 20))
+    return r
+
+
+def fetch_report(username: str, password: str) -> list:
+    """Log in and pull the Global Report JSON for a rolling REPORT_DAYS window."""
+    sess = _new_session()
+
+    log("Authenticating with Rich Audience…")
+    r = _request_with_retry(sess, "GET", LOGIN_PAGE)
+    csrf = _extract_csrf(r.text)
+    if not csrf:
+        sys.exit("ERROR: could not find the CSRF token on the login page — the login "
+                 "page structure may have changed. Sheet left unchanged.")
+    _request_with_retry(sess, "POST", LOGIN_PAGE,
+                        data={
+                            "_csrf": csrf,
+                            "LoginForm[email]": username,
+                            "LoginForm[password]": password,
+                            "login-button": "",
+                        },
+                        headers={"Referer": LOGIN_PAGE},
+                        allow_redirects=True)
+
+    log(f"Requesting Global Report JSON (last {REPORT_DAYS} days, dims=site+date)…")
+    today = date.today()
+    start = today - timedelta(days=REPORT_DAYS)
+    params = [
+        ("startDate", start.isoformat()),
+        ("endDate", today.isoformat()),
+        ("dimensions[]", "site"),
+        ("dimensions[]", "date"),
+        ("currency", "usd"),
+        ("openTrans", "0"),
+    ]
+    rr = _request_with_retry(sess, "GET", GET_REPORT_URL, params=params,
+                            headers={"X-Requested-With": "XMLHttpRequest",
+                                     "Accept": "application/json",
+                                     "Referer": REPORT_PAGE})
+
+    # If we're not authenticated the API returns HTML (login/OTP page), not JSON.
+    if "application/json" not in rr.headers.get("content-type", ""):
+        if _looks_like_otp_challenge(rr.text):
+            sys.exit(
+                "ERROR: Rich Audience now requires two-factor authentication (an emailed "
+                "one-time code) at login, so password-only sign-in no longer works. The "
+                "login step needs the OTP wired up before this can run again. No data was "
+                "fetched; the sheet was left unchanged."
+            )
+        sys.exit(
+            "ERROR: Rich Audience login did not succeed — the report API returned HTML "
+            "instead of JSON (most likely invalid credentials or a changed login flow). "
+            "The sheet was left unchanged."
         )
-        page = context.new_page()
+    try:
+        j = rr.json()
+    except ValueError:
+        sys.exit(f"ERROR: Rich Audience report was not valid JSON: {rr.text[:200]}")
+    if j.get("status") != "success":
+        sys.exit(f"ERROR: Rich Audience report returned status={j.get('status')!r}, "
+                 f"message={j.get('message')!r}.")
 
-        log("Navigating to Rich Audience login…")
-        page.goto(LOGIN_URL, wait_until="domcontentloaded")
-        page.wait_for_timeout(5000)
-        try:
-            page.fill('#loginform-email', username)
-            page.fill('#loginform-password', password)
-            page.click('button[type="submit"]:visible')
-            page.wait_for_timeout(8000)
-            if "login" in page.url.lower():
-                browser.close()
-                sys.exit("ERROR: Still on login page after submit — check credentials.")
-        except PlaywrightTimeoutError as e:
-            browser.close()
-            sys.exit(f"ERROR: Login failed (timeout).\nDetail: {e}")
-
-        log("Opening Reporting Tool (Global Report)…")
-        page.goto(REPORT_URL, wait_until="domcontentloaded")
-        page.wait_for_timeout(8000)
-
-        # Dismiss any pnotify toast/alert popups that can overlay the controls
-        # and intercept clicks.
-        def _clear_toasts():
-            try:
-                page.evaluate(
-                    "document.querySelectorAll('.ui-pnotify').forEach(e => e.remove())"
-                )
-            except Exception:
-                pass
-
-        log("Selecting date preset = Current month…")
-        try:
-            _clear_toasts()
-            # force=True bypasses any lingering transient overlay.
-            page.locator('#date-range-selectized').click(timeout=15_000, force=True)
-            page.wait_for_timeout(1200)
-            page.locator('.selectize-dropdown [data-value="30"]').click(timeout=10_000, force=True)
-            page.wait_for_timeout(1500)
-        except PlaywrightTimeoutError as e:
-            browser.close()
-            sys.exit(f"ERROR: Could not select Current month preset.\nDetail: {e}")
-
-        log("Adding dimensions: Site + Date…")
-        try:
-            _clear_toasts()
-            page.locator('button:has-text("DIMENSIONS")').click()
-            page.wait_for_timeout(1500)
-            page.get_by_text("Site", exact=True).first.click(timeout=10_000)
-            page.wait_for_timeout(1000)
-            page.locator('button:has-text("DIMENSIONS")').click()
-            page.wait_for_timeout(1500)
-            page.get_by_text("Date", exact=True).first.click(timeout=10_000)
-            page.wait_for_timeout(1000)
-            page.keyboard.press("Escape")
-            page.wait_for_timeout(500)
-        except PlaywrightTimeoutError as e:
-            browser.close()
-            sys.exit(f"ERROR: Could not add Site/Date dimensions.\nDetail: {e}")
-
-        log("Clicking Search…")
-        try:
-            page.locator('#search').click(timeout=15_000)
-        except PlaywrightTimeoutError as e:
-            browser.close()
-            sys.exit(f"ERROR: Could not click Search.\nDetail: {e}")
-
-        log("Waiting for report table…")
-        page.wait_for_timeout(15_000)
-
-        log("Triggering CSV export…")
-        try:
-            with page.expect_download(timeout=60_000) as dl_info:
-                page.locator('button.buttons-csv, a:has-text("CSV"), button:has-text("CSV")').first.click(timeout=15_000)
-            download = dl_info.value
-        except PlaywrightTimeoutError as e:
-            browser.close()
-            sys.exit(f"ERROR: CSV download did not start in time.\nDetail: {e}")
-
-        tmp = Path(tempfile.mktemp(suffix=".csv"))
-        download.save_as(str(tmp))
-        browser.close()
-
-    log(f"CSV downloaded → {tmp}")
-    return tmp
+    data = j.get("data") or []
+    log(f"Rich Audience returned {len(data)} rows ({start.isoformat()} → {today.isoformat()}).")
+    return data
 
 
 # ── Step 2 — Validate & shape ─────────────────────────────────────────────────
 
-def process_csv(csv_path: Path) -> pd.DataFrame:
-    log("Reading CSV…")
-    text = csv_path.read_text(errors="replace")
-    lines = text.splitlines()
-    skip = 0
-    for i, line in enumerate(lines):
-        if line.lstrip().lower().startswith(("site", '"site"', "date,", '"date"')):
-            skip = i
-            break
-    try:
-        df = pd.read_csv(StringIO("\n".join(lines[skip:])))
-    except Exception as e:
-        # An empty body (no header/rows) means no data for the requested range —
-        # at month start this is expected reporting lag, not a parse failure.
-        if not "\n".join(lines[skip:]).strip():
-            _empty_data_exit("downloaded CSV has no data")
-        sys.exit(f"ERROR: Could not parse CSV.\nDetail: {e}")
+def process_report(data: list) -> pd.DataFrame:
+    log("Shaping report rows…")
+    if not data:
+        _empty_data_exit("API returned no rows for the requested window")
 
-    if df.empty:
-        _empty_data_exit("downloaded CSV is empty")
+    df = pd.DataFrame(data)
+    # JSON field names from /report/global/pbd/get-report.
+    date_col, site_col = "date", "site"
+    impr_col, rev_col, ecpm_col = "impressions", "revenue", "ecpm"
 
-    df.columns = [c.strip() for c in df.columns]
-    log(f"CSV columns: {list(df.columns)}")
-
-    date_col = first_matching_column(df.columns, DATE_COL_CANDIDATES)
-    site_col = first_matching_column(df.columns, SITE_COL_CANDIDATES)
-    impr_col = first_matching_column(df.columns, IMPR_COL_CANDIDATES)
-    rev_col  = first_matching_column(df.columns, REV_COL_CANDIDATES)
-    ecpm_col = first_matching_column(df.columns, ECPM_COL_CANDIDATES)
-
-    missing = [name for name, col in [
-        ("date",        date_col),
-        ("site",        site_col),
-        ("impressions", impr_col),
-        ("revenue",     rev_col),
-        ("cpm",         ecpm_col),
-    ] if col is None]
+    missing = [k for k in (date_col, site_col, impr_col, rev_col, ecpm_col)
+               if k not in df.columns]
     if missing:
         sys.exit(
-            f"ERROR: Could not find columns {missing} in the CSV.\n"
-            f"       Found columns: {list(df.columns)}\n"
+            f"ERROR: Could not find fields {missing} in the API response.\n"
+            f"       Got fields: {list(df.columns)}\n"
             "       Aborting to protect the sheet."
         )
 
@@ -347,7 +348,7 @@ def process_csv(csv_path: Path) -> pd.DataFrame:
     df = df[parsed.notna()].copy()
     df["__date"] = pd.to_datetime(df[date_col], errors="coerce")
     if df.empty:
-        sys.exit("ERROR: No valid rows after date parsing — aborting.")
+        _empty_data_exit("no valid rows after date parsing")
 
     newest = df["__date"].max()
     age_days = (datetime.now() - newest).days
@@ -487,12 +488,9 @@ def main():
     cfg   = load_config()
     creds = load_service_account()
 
-    csv_path = download_richaudience_csv(cfg["richaudience_username"], cfg["richaudience_password"])
-    df       = process_csv(csv_path)
+    data = fetch_report(cfg["richaudience_username"], cfg["richaudience_password"])
+    df   = process_report(data)
     write_sheet(df, creds)
-
-    try: csv_path.unlink()
-    except Exception: pass
     log("=== Done. ===")
 
 
