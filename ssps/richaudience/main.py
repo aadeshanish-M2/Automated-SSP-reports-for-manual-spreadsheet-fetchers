@@ -20,12 +20,15 @@ step here must be extended to supply the OTP — fetch_report() detects the chal
 and exits with a clear message rather than failing cryptically.
 """
 
+import email
+import imaplib
 import json
 import os
 import re
 import sys
 import time
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 
 import pandas as pd
@@ -49,6 +52,20 @@ GET_REPORT_URL = "https://platform.richaudience.com/report/global/pbd/get-report
 # rows fresh and preserves older history, so a 30-day pull spans the month boundary
 # without ever overwriting prior-month data.
 REPORT_DAYS    = 30
+
+# ── Two-factor auth (email OTP) ───────────────────────────────────────────────
+# Rich Audience is rolling out mandatory 2FA: at login it emails a one-time code
+# to the account's address (addemand@monetizemore.com) which must be submitted to
+# finish signing in. We read that code over IMAP. These credentials are OPTIONAL —
+# only needed once 2FA is active; until then login is password-only and this is
+# unused. The email arrives FROM info@richaudience.com (same sender as RA's other
+# mail). App-password IMAP; creds live in config.json / Streamlit secrets as
+# richaudience_otp_imap_user / richaudience_otp_imap_password.
+IMAP_HOST           = "imap.gmail.com"
+IMAP_PORT           = 993
+OTP_SENDER          = "info@richaudience.com"
+OTP_EMAIL_WAIT_SECS = 150   # poll the inbox up to this long for the code to arrive
+OTP_POLL_EVERY      = 6
 
 # Rich Audience reports low-volume accounts with a genuine multi-day lag — the
 # "Current month" range is requested correctly (verified: Start=1st, End=today),
@@ -150,19 +167,22 @@ def _empty_data_exit(reason: str) -> None:
 
 
 _REQUIRED_KEYS = ("richaudience_username", "richaudience_password")
+# Optional — only consumed when 2FA is active (see the OTP section above).
+_OPTIONAL_KEYS = ("richaudience_otp_imap_user", "richaudience_otp_imap_password")
 
 
 def load_config() -> dict:
     """Credentials: env vars first (UPPER_CASE), then config.json fallback."""
     cfg = {}
-    for k in _REQUIRED_KEYS:
+    all_keys = _REQUIRED_KEYS + _OPTIONAL_KEYS
+    for k in all_keys:
         v = os.environ.get(k.upper())
         if v:
             cfg[k] = v
     if CONFIG_PATH.exists():
         try:
             file_cfg = json.loads(CONFIG_PATH.read_text())
-            for k in _REQUIRED_KEYS:
+            for k in all_keys:
                 if not cfg.get(k) and file_cfg.get(k):
                     cfg[k] = file_cfg[k]
         except Exception:
@@ -256,8 +276,145 @@ def _request_with_retry(sess, method, url, **kw):
     return r
 
 
-def fetch_report(username: str, password: str) -> list:
-    """Log in and pull the Global Report JSON for a rolling REPORT_DAYS window."""
+def _email_subject(msg) -> str:
+    from email.header import make_header, decode_header
+    try:
+        return str(make_header(decode_header(msg.get("Subject", "") or "")))
+    except Exception:
+        return msg.get("Subject", "") or ""
+
+
+def _email_text(msg) -> str:
+    """Return the plain-text body (HTML stripped as a fallback)."""
+    try:
+        if msg.is_multipart():
+            for want in ("text/plain", "text/html"):
+                for part in msg.walk():
+                    if part.get_content_type() == want:
+                        raw = part.get_payload(decode=True) or b""
+                        txt = raw.decode(part.get_content_charset() or "utf-8", "replace")
+                        return re.sub("<[^>]+>", " ", txt) if want == "text/html" else txt
+            return ""
+        raw = msg.get_payload(decode=True)
+        return (raw.decode(msg.get_content_charset() or "utf-8", "replace")
+                if raw else (msg.get_payload() or ""))
+    except Exception:
+        return ""
+
+
+def _extract_code(subject: str, body: str) -> str:
+    """Pull the OTP from the email: prefer a number next to a keyword, then a
+    6-digit number, then any 4–8 digit number."""
+    hay = f"{subject}\n{body}"
+    m = re.search(r'(?:code|c[oó]digo|otp|password|contrase[nñ]a|pin)\D{0,20}(\d{4,8})', hay, re.I)
+    if m:
+        return m.group(1)
+    m = re.search(r'(?<!\d)(\d{6})(?!\d)', hay)
+    if m:
+        return m.group(1)
+    m = re.search(r'(?<!\d)(\d{4,8})(?!\d)', hay)
+    return m.group(1) if m else ""
+
+
+def _read_otp_from_email(imap_user: str, imap_pw: str, since_dt: datetime) -> str:
+    """Poll the mailbox for the newest Rich Audience OTP email received around/after
+    `since_dt` and return its code. Raises RuntimeError on timeout."""
+    deadline = time.time() + OTP_EMAIL_WAIT_SECS
+    since_imap = (since_dt - timedelta(days=1)).strftime("%d-%b-%Y")  # IMAP date is day-granular
+    cutoff = since_dt - timedelta(minutes=2)
+    last_err = None
+    while time.time() < deadline:
+        try:
+            M = imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT)
+            M.login(imap_user, imap_pw)
+            M.select("INBOX")
+            typ, ids = M.search(None, 'FROM', f'"{OTP_SENDER}"', 'SINCE', since_imap)
+            id_list = ids[0].split() if ids and ids[0] else []
+            for num in reversed(id_list):          # newest first
+                typ, d = M.fetch(num, "(RFC822)")
+                if not d or not d[0]:
+                    continue
+                msg = email.message_from_bytes(d[0][1])
+                try:
+                    recv = parsedate_to_datetime(msg.get("Date"))
+                    if recv and recv.tzinfo is None:
+                        recv = recv.replace(tzinfo=timezone.utc)
+                    if recv and recv < cutoff:     # older than this login attempt
+                        break
+                except Exception:
+                    pass
+                code = _extract_code(_email_subject(msg), _email_text(msg))
+                if code:
+                    try: M.logout()
+                    except Exception: pass
+                    return code
+            try: M.logout()
+            except Exception: pass
+        except Exception as e:
+            last_err = e
+        time.sleep(OTP_POLL_EVERY)
+    raise RuntimeError(
+        f"no OTP email from {OTP_SENDER} arrived within {OTP_EMAIL_WAIT_SECS}s"
+        + (f" (last IMAP error: {last_err})" if last_err else "")
+    )
+
+
+def _submit_otp(sess, challenge_html: str, challenge_url: str, otp: str) -> None:
+    """Adaptively submit the OTP into whatever challenge form RA presents: parse the
+    form action + all inputs (incl. _csrf), discover the code field by name/type,
+    fill it, and POST. Field names are read from the page, not hardcoded, because the
+    exact 2FA form isn't visible until RA turns it on — so this is best-effort and
+    must be verified once 2FA is live."""
+    from urllib.parse import urljoin
+    forms = re.findall(r'<form\b[^>]*>.*?</form>', challenge_html, re.I | re.S)
+    form = challenge_html
+    for f in forms:
+        if re.search(r'LoginForm\[email\]', f):   # skip the plain login form
+            continue
+        form = f
+        if re.search(r'(code|otp|token|pin|verif|auth|two|factor|2fa)', f, re.I):
+            break
+
+    am = re.search(r'<form\b[^>]*\baction="([^"]*)"', form, re.I)
+    action = urljoin(challenge_url, am.group(1)) if am and am.group(1) else challenge_url
+
+    fields, otp_field = {}, None
+    input_tags = re.findall(r'<input\b[^>]*>', form, re.I)
+    for tag in input_tags:
+        nm = re.search(r'\bname="([^"]+)"', tag, re.I)
+        if not nm:
+            continue
+        name = nm.group(1)
+        val = re.search(r'\bvalue="([^"]*)"', tag, re.I)
+        itype = re.search(r'\btype="([^"]*)"', tag, re.I)
+        itype = (itype.group(1).lower() if itype else "text")
+        fields[name] = val.group(1) if val else ""
+        if (otp_field is None and itype in ("text", "tel", "number", "password", "")
+                and re.search(r'(code|otp|token|pin|verif|auth|digit|factor)', tag, re.I)):
+            otp_field = name
+    if otp_field is None:                          # fall back: first text-ish input
+        for tag in input_tags:
+            itype = re.search(r'\btype="([^"]*)"', tag, re.I)
+            itype = (itype.group(1).lower() if itype else "text")
+            nm = re.search(r'\bname="([^"]+)"', tag, re.I)
+            if nm and itype in ("text", "tel", "number", ""):
+                otp_field = nm.group(1)
+                break
+    if otp_field is None:
+        sys.exit("ERROR: 2FA challenge detected but the code input field could not be "
+                 "located on the page — the live challenge needs inspecting to finish "
+                 "wiring. Sheet left unchanged.")
+
+    fields[otp_field] = otp
+    log(f"Submitting OTP into field {otp_field!r} → {action}")
+    _request_with_retry(sess, "POST", action, data=fields,
+                        headers={"Referer": challenge_url}, allow_redirects=True)
+
+
+def fetch_report(username: str, password: str,
+                 imap_user: str = None, imap_pw: str = None) -> list:
+    """Log in (handling 2FA email-OTP if required) and pull the Global Report JSON
+    for a rolling REPORT_DAYS window."""
     sess = _new_session()
 
     log("Authenticating with Rich Audience…")
@@ -266,7 +423,8 @@ def fetch_report(username: str, password: str) -> list:
     if not csrf:
         sys.exit("ERROR: could not find the CSRF token on the login page — the login "
                  "page structure may have changed. Sheet left unchanged.")
-    _request_with_retry(sess, "POST", LOGIN_PAGE,
+    login_at = datetime.now(timezone.utc)
+    login_resp = _request_with_retry(sess, "POST", LOGIN_PAGE,
                         data={
                             "_csrf": csrf,
                             "LoginForm[email]": username,
@@ -276,7 +434,6 @@ def fetch_report(username: str, password: str) -> list:
                         headers={"Referer": LOGIN_PAGE},
                         allow_redirects=True)
 
-    log(f"Requesting Global Report JSON (last {REPORT_DAYS} days, dims=site+date)…")
     today = date.today()
     start = today - timedelta(days=REPORT_DAYS)
     params = [
@@ -287,25 +444,50 @@ def fetch_report(username: str, password: str) -> list:
         ("currency", "usd"),
         ("openTrans", "0"),
     ]
-    rr = _request_with_retry(sess, "GET", GET_REPORT_URL, params=params,
-                            headers={"X-Requested-With": "XMLHttpRequest",
-                                     "Accept": "application/json",
-                                     "Referer": REPORT_PAGE})
+
+    def _get_report():
+        return _request_with_retry(sess, "GET", GET_REPORT_URL, params=params,
+                                   headers={"X-Requested-With": "XMLHttpRequest",
+                                            "Accept": "application/json",
+                                            "Referer": REPORT_PAGE})
+
+    log(f"Requesting Global Report JSON (last {REPORT_DAYS} days, dims=site+date)…")
+    rr = _get_report()
 
     # If we're not authenticated the API returns HTML (login/OTP page), not JSON.
     if "application/json" not in rr.headers.get("content-type", ""):
-        if _looks_like_otp_challenge(rr.text):
+        on_otp = _looks_like_otp_challenge(login_resp.text)
+        if on_otp or _looks_like_otp_challenge(rr.text):
+            log("Two-factor challenge detected — retrieving the emailed OTP…")
+            if not (imap_user and imap_pw):
+                sys.exit(
+                    "ERROR: Rich Audience now requires two-factor authentication (an emailed "
+                    "one-time code), but no OTP mailbox is configured. Set "
+                    "richaudience_otp_imap_user / richaudience_otp_imap_password. "
+                    "Sheet left unchanged."
+                )
+            try:
+                otp = _read_otp_from_email(imap_user, imap_pw, login_at)
+            except Exception as e:
+                sys.exit(f"ERROR: could not retrieve the Rich Audience OTP from email: {e}. "
+                         "Sheet left unchanged.")
+            log(f"OTP retrieved ({'*' * max(len(otp) - 1, 0)}{otp[-1:]}); submitting…")
+            challenge_html = login_resp.text if on_otp else rr.text
+            challenge_url  = login_resp.url if on_otp else GET_REPORT_URL
+            _submit_otp(sess, challenge_html, challenge_url, otp)
+            rr = _get_report()
+            if "application/json" not in rr.headers.get("content-type", ""):
+                sys.exit(
+                    "ERROR: still not authenticated after submitting the OTP — the live 2FA "
+                    "challenge form likely differs from what the adaptive submitter expected "
+                    "and needs inspecting. Sheet left unchanged."
+                )
+        else:
             sys.exit(
-                "ERROR: Rich Audience now requires two-factor authentication (an emailed "
-                "one-time code) at login, so password-only sign-in no longer works. The "
-                "login step needs the OTP wired up before this can run again. No data was "
-                "fetched; the sheet was left unchanged."
+                "ERROR: Rich Audience login did not succeed — the report API returned HTML "
+                "instead of JSON (most likely invalid credentials or a changed login flow). "
+                "The sheet was left unchanged."
             )
-        sys.exit(
-            "ERROR: Rich Audience login did not succeed — the report API returned HTML "
-            "instead of JSON (most likely invalid credentials or a changed login flow). "
-            "The sheet was left unchanged."
-        )
     try:
         j = rr.json()
     except ValueError:
@@ -488,7 +670,9 @@ def main():
     cfg   = load_config()
     creds = load_service_account()
 
-    data = fetch_report(cfg["richaudience_username"], cfg["richaudience_password"])
+    data = fetch_report(cfg["richaudience_username"], cfg["richaudience_password"],
+                        cfg.get("richaudience_otp_imap_user"),
+                        cfg.get("richaudience_otp_imap_password"))
     df   = process_report(data)
     write_sheet(df, creds)
     log("=== Done. ===")
