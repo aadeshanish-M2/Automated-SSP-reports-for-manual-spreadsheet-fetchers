@@ -32,7 +32,11 @@ SHEET_NAME     = "Sheet1"
 SCOPES         = ["https://www.googleapis.com/auth/spreadsheets"]
 
 API_URL        = "https://partner.yandex.ru/api/statistics2/get.json"
-DATE_PERIOD    = "30days"         # rolling 30-day window (spans month boundary)
+DATE_PERIOD    = "7days"          # max window Yandex now allows: 30days/14days → 400
+                                  # "[A very long period]" (new cap as of Oct 2026);
+                                  # only today/yesterday/7days/lastweek are accepted.
+                                  # Daily runs + preserve-all (see write_sheet) let the
+                                  # full month accumulate from this rolling 7-day pull.
 IMPR_FIELD     = "impressions"
 REV_FIELD      = "partner_wo_nds"
 ECPM_FIELD     = "ecpm_partner_wo_nds"
@@ -273,10 +277,10 @@ def process_points(points: list[dict]) -> pd.DataFrame:
             f"Expected within {MAX_ALLOWED_AGE_DAYS} days — aborting."
         )
 
-    # Keep the FULL pulled window (period=30days) — do NOT MTD-filter, so the
-    # previous month's final day is refreshed once it is no longer "today"; the
-    # write step's per-(Domain, Date) dedup overwrites any frozen partial and
-    # older history is preserved. Fixes the month-boundary freeze.
+    # Keep the FULL pulled window (rolling 7 days) — do NOT MTD-filter. The write
+    # step preserves all existing rows and the per-(Domain, Date) dedup overwrites
+    # the refreshed days with fresh values, so older current-month days and previous
+    # months are kept while the recent window is restated each run.
     log(f"Keeping full pulled window: {len(df)} rows.")
 
     out = pd.DataFrame({
@@ -326,39 +330,20 @@ def write_sheet(df: pd.DataFrame, creds) -> None:
     rows.sort(key=lambda r: (r[0], r[1]))
     rows.sort(key=lambda r: r[0], reverse=True)
 
-    # Preserve previous-month rows; only the current month gets refreshed.
-
-
+    # Preserve ALL existing rows, then let the fresh pull overwrite matching
+    # (Domain, Date) via the fresh-first dedup below. This is REQUIRED now that the
+    # pull is only a rolling 7 days (Yandex capped the period): the current month is
+    # built up incrementally across daily runs — each day is refreshed while it sits
+    # in the 7-day window, then preserved thereafter. (Previously we dropped all
+    # current-month rows and rewrote them from a single 30-day pull; with a 7-day
+    # window that would truncate the month to its last 7 days.)
     existing = service.spreadsheets().values().get(
-
-
         spreadsheetId=SPREADSHEET_ID, range=_tab,
-
-
     ).execute().get("values", [])
-
-
-    current_month = datetime.now().strftime("%Y-%m")
-
-
     preserved = []
-
-
     for _r in existing:
-
-
         if not _r or _r == HEADER:
-
-
             continue
-
-
-        if len(_r) >= 2 and str(_r[1]).strip().startswith(current_month):
-
-
-            continue  # current-month row → will be replaced by fresh data
-
-
         preserved.append(_r)
 
 

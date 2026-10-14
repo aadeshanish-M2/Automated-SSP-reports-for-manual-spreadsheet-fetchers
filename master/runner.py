@@ -38,6 +38,7 @@ SSPS = [
     ("Taboola",    SSPS_DIR / "taboola"),
     ("InMobi-S2S HB", SSPS_DIR / "inmobi"),
     ("TrustedStack-S2S HB", SSPS_DIR / "trustedstack"),
+    ("Epsilon-S2S HB", SSPS_DIR / "epsilon"),
     # Connatix runs last because its refresh can take 5+ min and we'd rather
     # not block the fast ones behind it.
     ("Connatix",   SSPS_DIR / "connatix"),
