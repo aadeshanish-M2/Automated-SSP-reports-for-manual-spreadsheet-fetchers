@@ -23,6 +23,7 @@ SSPS_DIR     = PROJECT_ROOT / "ssps"
 SSPS = [
     ("Teal",       SSPS_DIR / "teal"),
     ("Nexxen",     SSPS_DIR / "nexxen"),
+    ("Nexxen-S2S HB", SSPS_DIR / "nexxen_s2s"),
     ("MGID",       SSPS_DIR / "mgid"),
     ("Kuantyx",    SSPS_DIR / "kuantyx"),
     ("Adsolut",    SSPS_DIR / "adsolut"),

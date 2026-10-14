@@ -52,7 +52,13 @@ DETAILED_URL   = f"{API_BASE}/ctrl/api/insights/detailed"
 DOWNLOAD_URL   = f"{API_BASE}/ctrl/api/download/fileURL"
 
 DATE_RANGE     = "LAST_30_DAYS"
-GROUP_BY       = ["EVENT_TIME", "DOMAIN_BUNDLE"]
+# PLACEMENT_ID is added so we can isolate the client-side placement. Nexxen runs two
+# placements for MonetizeMore: client-side 270562 ("270562_Prebid_RON") and
+# server-side 284202 ("284202_Prebid_RON_S2S"). THIS sheet is the client-side
+# integration, so after pulling we keep only CLIENT_PLACEMENT_ID rows. (A future
+# server-side sheet would filter to 284202 and apply the 7% S2S fee instead.)
+GROUP_BY       = ["EVENT_TIME", "DOMAIN_BUNDLE", "PLACEMENT_ID"]
+CLIENT_PLACEMENT_ID = str(os.environ.get("NEXXEN_CLIENT_PLACEMENT_ID") or "270562")
 
 # Column-name candidates — actual API CSV headers may differ slightly.
 DATE_COL_CANDIDATES = ["Date", "Event Time", "EVENT_TIME", "Day"]
@@ -62,6 +68,7 @@ IMPR_COL_CANDIDATES = ["Impressions", "IMPRESSIONS", "Imps"]
 REV_COL_CANDIDATES  = ["Est. Earnings (USD)", "Est Earnings (USD)", "EST_EARNING",
                        "Earnings (USD)", "Revenue"]
 ECPM_COL_CANDIDATES = ["eCPM (USD)", "eCPM(USD)", "ECPM", "eCPM"]
+PLACEMENT_COL_CANDIDATES = ["Placement ID", "PLACEMENT_ID", "Placement Id", "PlacementId"]
 
 MAX_ALLOWED_AGE_DAYS = 5      # abort if newest date in CSV older than this
 DOWNLOAD_TIMEOUT_S   = 600    # give the report up to 10 min to land in S3
@@ -286,6 +293,24 @@ def process_df(df: pd.DataFrame) -> pd.DataFrame:
             f"ERROR: Could not find columns {missing} in the CSV.\n"
             f"       Found columns: {list(df.columns)}\n"
             "       Aborting to protect the sheet."
+        )
+
+    # Isolate the CLIENT-SIDE placement. Fail hard if the placement column is absent
+    # rather than silently letting server-side (284202) revenue into this sheet.
+    plc_col = first_matching_column(df.columns, PLACEMENT_COL_CANDIDATES)
+    if plc_col is None:
+        sys.exit(
+            "ERROR: Placement column not found, so the client-side placement "
+            f"({CLIENT_PLACEMENT_ID}) cannot be isolated — refusing to write mixed "
+            f"client+server data.\n       Found columns: {list(df.columns)}"
+        )
+    before = len(df)
+    df = df[df[plc_col].astype(str).str.strip() == CLIENT_PLACEMENT_ID].copy()
+    log(f"Isolated client placement {CLIENT_PLACEMENT_ID}: kept {len(df)}/{before} rows.")
+    if df.empty:
+        sys.exit(
+            f"ERROR: No rows for client placement {CLIENT_PLACEMENT_ID} in the pulled "
+            "window — aborting rather than writing an empty/incorrect sheet."
         )
 
     df = df.dropna(subset=[site_col, date_col])

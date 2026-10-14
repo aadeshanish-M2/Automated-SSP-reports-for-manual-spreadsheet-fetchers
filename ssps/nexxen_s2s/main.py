@@ -1,0 +1,556 @@
+#!/usr/bin/env python3
+"""
+Nexxen Detailed Reporting API → Google Sheets daily revenue sync.  [SERVER-SIDE / S2S]
+
+Server-side counterpart of the Nexxen HB sync. Same Nexxen account/credentials and
+Reports API (ssp-api.nexxen.com), but grouped by PLACEMENT_ID and filtered to the
+SERVER-SIDE placement (284202 / "284202_Prebid_RON_S2S"); revenue is written net of a
+7% S2S service-provider fee (see SERVER_SIDE_FEE), and CPM is recomputed from the
+reduced revenue so it drops the same 7%. Sub-cent daily values are stored at full
+precision. The client-side placement (270562) lives in the separate "Nexxen HB" sheet.
+
+Pulls the last 30 days, grouped by Date + Site/App Bundle + Placement ID. Upserts rows
+keyed on (Date, Site/App Bundle); older rows outside the 30-day window are left as-is.
+If anything looks wrong (empty file, missing columns, super-old data, missing placement
+column) the sheet is left untouched.
+"""
+
+import json
+import os
+import sys
+import time
+from datetime import datetime
+from io import StringIO
+from pathlib import Path
+
+# Nexxen's API (ssp-api.nexxen.com) serves a Sectigo cert whose root isn't in
+# certifi's bundle, causing CERTIFICATE_VERIFY_FAILED. truststore makes Python
+# use the OS native trust store (which has the Sectigo root on both macOS and
+# the Debian-based Streamlit cloud), fixing the handshake without disabling
+# verification. Harmless no-op if truststore isn't installed.
+try:
+    import truststore
+    truststore.inject_into_ssl()
+except Exception:
+    pass
+
+import pandas as pd
+import requests
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+
+# ── Configuration ─────────────────────────────────────────────────────────────
+
+SCRIPT_DIR     = Path(__file__).parent
+CONFIG_PATH    = SCRIPT_DIR / "config.json"
+SA_PATH        = SCRIPT_DIR / "service_account.json"
+SPREADSHEET_ID = os.environ.get("SHEETS_SPREADSHEET_ID") or "1_07iqoYMyfNZkAFNtwq3UYd5FX6EyZcoUFRX5XrYcv4"
+SHEET_NAME     = "Sheet1"
+SCOPES         = ["https://www.googleapis.com/auth/spreadsheets"]
+
+API_BASE       = "https://ssp-api.nexxen.com"
+AUTH_URL       = f"{API_BASE}/ctrl/auth"
+DETAILED_URL   = f"{API_BASE}/ctrl/api/insights/detailed"
+DOWNLOAD_URL   = f"{API_BASE}/ctrl/api/download/fileURL"
+
+DATE_RANGE     = "LAST_30_DAYS"
+# PLACEMENT_ID is grouped so we can isolate the SERVER-SIDE placement. Nexxen runs two
+# placements for MonetizeMore: client-side 270562 ("270562_Prebid_RON", in the regular
+# "Nexxen HB" sheet) and server-side 284202 ("284202_Prebid_RON_S2S"). THIS sheet is
+# the server-side (S2S) integration, so after pulling we keep only SERVER_PLACEMENT_ID
+# rows and write revenue net of the 7% S2S fee (see SERVER_SIDE_FEE).
+GROUP_BY       = ["EVENT_TIME", "DOMAIN_BUNDLE", "PLACEMENT_ID"]
+SERVER_PLACEMENT_ID = str(os.environ.get("NEXXEN_SERVER_PLACEMENT_ID") or "284202")
+
+# Server-side (S2S) integration: 7% service-provider fee deducted from publisher-net
+# revenue. Revenue is written net; CPM (= revenue/impressions*1000) drops the same 7%
+# since it is recomputed from the reduced revenue. Override with NEXXEN_SERVER_SIDE_FEE.
+SERVER_SIDE_FEE = float(os.environ.get("NEXXEN_SERVER_SIDE_FEE") or 0.07)
+
+# Revenue column display format: min 2 decimals, up to 6 shown ($17.91, $0.000186).
+# Stamped after every write because values().update() with a "$"-prefixed string makes
+# Sheets auto-apply a sticky currency format that would truncate full-precision values.
+REVENUE_COL_INDEX     = 2   # 0-based: Domain=0, Date=1, Revenue=2
+REVENUE_NUMBER_FORMAT = '"$"#,##0.00####'
+
+# Column-name candidates — actual API CSV headers may differ slightly.
+DATE_COL_CANDIDATES = ["Date", "Event Time", "EVENT_TIME", "Day"]
+SITE_COL_CANDIDATES = ["Site/App Bundle", "Domain Bundle", "DOMAIN_BUNDLE",
+                       "Site / App Bundle", "Site/App bundle", "Site", "Bundle"]
+IMPR_COL_CANDIDATES = ["Impressions", "IMPRESSIONS", "Imps"]
+REV_COL_CANDIDATES  = ["Est. Earnings (USD)", "Est Earnings (USD)", "EST_EARNING",
+                       "Earnings (USD)", "Revenue"]
+ECPM_COL_CANDIDATES = ["eCPM (USD)", "eCPM(USD)", "ECPM", "eCPM"]
+PLACEMENT_COL_CANDIDATES = ["Placement ID", "PLACEMENT_ID", "Placement Id", "PlacementId"]
+
+MAX_ALLOWED_AGE_DAYS = 5      # abort if newest date in CSV older than this
+DOWNLOAD_TIMEOUT_S   = 600    # give the report up to 10 min to land in S3
+DOWNLOAD_POLL_S      = 20     # poll the download endpoint every N seconds
+
+HEADER = ["Domain", "Date", "Revenue", "Impression", "CPM"]
+
+
+def _fmt_money(v) -> str:
+    """Format a dollar value with up to 6 decimals (trailing zeros trimmed, min 2 dp).
+    At sub-cent daily revenues — and after the ×0.93 S2S fee — flat 2 dp rounding would
+    shift each row by up to half a cent and those errors accumulate when summed. 6 dp
+    keeps every stored value effectively lossless while staying readable."""
+    try:
+        v = float(v)
+    except Exception:
+        v = 0.0
+    s = f"{v:.6f}"
+    if "." in s:
+        intp, frac = s.split(".")
+        frac = frac.rstrip("0")
+        if len(frac) < 2:
+            frac = (frac + "00")[:2]
+        s = f"{intp}.{frac}"
+    return f"${s}"
+
+
+def _normalize_and_aggregate(rows):
+    """
+    Collapse URL paths AND subdomains in Domain values to their registered
+    root domain (e.g. https://abc.jugantor.com/sports → jugantor.com), then
+    sum Impression + Revenue across same (Domain, Date) groups. Revenue is taken
+    net of the 7% server-side fee here, so both the stored revenue and the CPM
+    recomputed from totals (net Revenue/Impression * 1000) carry it.
+
+    Uses the Public Suffix List via tldextract so multi-part TLDs like
+    .co.uk, .com.br, .gov.in resolve correctly.
+    """
+    from urllib.parse import urlparse
+    try:
+        import tldextract
+        # suffix_list_urls=() forces use of bundled PSL snapshot only — no
+        # network call on first run, important for stateless cloud containers.
+        _extract = tldextract.TLDExtract(suffix_list_urls=(), cache_dir=False)
+    except ImportError:
+        _extract = None
+
+    def root(s):
+        s = str(s).strip()
+        if "://" in s:
+            try:
+                s = urlparse(s).netloc or s
+            except Exception:
+                pass
+        s = s.lower().split("/")[0].split(":")[0]
+        if not s:
+            return ""
+        if _extract is not None:
+            ext = _extract(s)
+            if ext.domain and ext.suffix:
+                return f"{ext.domain}.{ext.suffix}"
+        # Fallback: strip only "www."
+        if s.startswith("www."):
+            s = s[4:]
+        return s
+
+    bucket = {}
+    for r in rows:
+        domain = root(r[0])
+        date   = str(r[1]).strip()
+        try:
+            rev = float(str(r[2]).lstrip("$").replace(",", ""))
+        except Exception:
+            rev = 0.0
+        # Server-side fee: report revenue net of the 7% service-provider fee.
+        rev *= (1 - SERVER_SIDE_FEE)
+        try:
+            imp = int(float(str(r[3])))
+        except Exception:
+            imp = 0
+        k = (domain, date)
+        if k in bucket:
+            bucket[k]["rev"] += rev
+            bucket[k]["imp"] += imp
+        else:
+            bucket[k] = {"rev": rev, "imp": imp}
+
+    new_rows = []
+    for (domain, date), v in bucket.items():
+        cpm = round(v["rev"] / v["imp"] * 1000, 6) if v["imp"] > 0 else 0.0
+        new_rows.append([domain, date, _fmt_money(v["rev"]), v["imp"], cpm])
+    return new_rows
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def log(msg: str) -> None:
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
+
+
+_REQUIRED_KEYS = ("nexxen_api_username", "nexxen_api_password", "nexxen_api_key")
+
+
+def load_config() -> dict:
+    """Credentials: env vars first (UPPER_CASE), then config.json fallback."""
+    cfg = {}
+    for k in _REQUIRED_KEYS:
+        v = os.environ.get(k.upper())
+        if v:
+            cfg[k] = v
+    if CONFIG_PATH.exists():
+        try:
+            file_cfg = json.loads(CONFIG_PATH.read_text())
+            for k in _REQUIRED_KEYS:
+                if not cfg.get(k) and file_cfg.get(k):
+                    cfg[k] = file_cfg[k]
+        except Exception:
+            pass
+    missing = [k for k in _REQUIRED_KEYS if not cfg.get(k)]
+    if missing:
+        env_names = ", ".join(k.upper() for k in missing)
+        sys.exit(
+            f"ERROR: Missing credentials {missing}. "
+            f"Set env vars [{env_names}] or fill config.json."
+        )
+    return cfg
+
+
+
+def load_service_account():
+    """Service account: env var GOOGLE_SERVICE_ACCOUNT_JSON first, then file."""
+    sa_json_str = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
+    if sa_json_str:
+        try:
+            sa_info = json.loads(sa_json_str)
+            return service_account.Credentials.from_service_account_info(
+                sa_info, scopes=SCOPES
+            )
+        except Exception as e:
+            sys.exit(f"ERROR: GOOGLE_SERVICE_ACCOUNT_JSON env var invalid: {e}")
+    if not SA_PATH.exists():
+        sys.exit(f"ERROR: {SA_PATH} not found and GOOGLE_SERVICE_ACCOUNT_JSON not set.")
+    sa = json.loads(SA_PATH.read_text())
+    if not sa.get("client_email") or not sa.get("private_key"):
+        sys.exit("ERROR: service_account.json is not populated.")
+    return service_account.Credentials.from_service_account_file(
+        str(SA_PATH), scopes=SCOPES
+    )
+
+
+
+def first_matching_column(df_cols, candidates):
+    norm = {c.strip().lower(): c for c in df_cols}
+    for cand in candidates:
+        if cand.strip().lower() in norm:
+            return norm[cand.strip().lower()]
+    return None
+
+
+# ── Step 1 — Talk to the Nexxen API ───────────────────────────────────────────
+
+def login(username: str, password: str) -> str:
+    log("Logging into Nexxen API…")
+    r = requests.post(AUTH_URL, data={"username": username, "password": password}, timeout=30)
+    if r.status_code != 200:
+        sys.exit(f"ERROR: Auth failed ({r.status_code}): {r.text[:300]}")
+    token = r.json().get("access_token")
+    if not token:
+        sys.exit(f"ERROR: Auth response had no access_token: {r.text[:300]}")
+    return token
+
+
+def request_detailed_report(token: str, api_key: str) -> str:
+    log(f"Requesting Detailed report ({DATE_RANGE}, groupBy={GROUP_BY})…")
+    r = requests.post(
+        DETAILED_URL,
+        params={"dateRange": DATE_RANGE, "apiKey": api_key},
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type":  "application/json",
+        },
+        json={"groupBy": GROUP_BY, "currency": "USD"},
+        timeout=60,
+    )
+    if r.status_code != 200:
+        sys.exit(f"ERROR: Report request failed ({r.status_code}): {r.text[:400]}")
+    # Response is the bare filename string (sometimes wrapped in quotes).
+    filename = r.text.strip().strip('"')
+    if not filename.endswith(".csv"):
+        sys.exit(f"ERROR: Unexpected report-request response: {r.text[:300]}")
+    log(f"Report queued: {filename}")
+    return filename
+
+
+def fetch_csv(token: str, api_key: str, filename: str) -> pd.DataFrame:
+    log("Polling download endpoint…")
+    deadline = time.time() + DOWNLOAD_TIMEOUT_S
+    s3_url = ""
+    while time.time() < deadline:
+        r = requests.get(
+            DOWNLOAD_URL,
+            params={"fileName": filename, "apiKey": api_key},
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=30,
+        )
+        if r.status_code != 200:
+            sys.exit(f"ERROR: Download URL request failed ({r.status_code}): {r.text[:300]}")
+        s3_url = r.json().get("S3_FILE_URL", "")
+        if s3_url:
+            break
+        log(f"  not ready yet, waiting {DOWNLOAD_POLL_S}s…")
+        time.sleep(DOWNLOAD_POLL_S)
+    if not s3_url:
+        sys.exit("ERROR: Report still not available after 10 minutes — aborting.")
+
+    log("Downloading CSV from S3…")
+    r = requests.get(s3_url, timeout=120)
+    if r.status_code != 200:
+        sys.exit(f"ERROR: S3 download failed ({r.status_code}).")
+    return pd.read_csv(StringIO(r.text))
+
+
+# ── Step 2 — Validate & shape ─────────────────────────────────────────────────
+
+def process_df(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        sys.exit("ERROR: Downloaded CSV is empty — aborting.")
+    df.columns = [c.strip() for c in df.columns]
+
+    date_col = first_matching_column(df.columns, DATE_COL_CANDIDATES)
+    site_col = first_matching_column(df.columns, SITE_COL_CANDIDATES)
+    impr_col = first_matching_column(df.columns, IMPR_COL_CANDIDATES)
+    rev_col  = first_matching_column(df.columns, REV_COL_CANDIDATES)
+    ecpm_col = first_matching_column(df.columns, ECPM_COL_CANDIDATES)
+
+    missing = [name for name, col in [
+        ("Date",            date_col),
+        ("Site/App Bundle", site_col),
+        ("Impressions",     impr_col),
+        ("Revenue",         rev_col),
+        ("eCPM",            ecpm_col),
+    ] if col is None]
+    if missing:
+        sys.exit(
+            f"ERROR: Could not find columns {missing} in the CSV.\n"
+            f"       Found columns: {list(df.columns)}\n"
+            "       Aborting to protect the sheet."
+        )
+
+    # Isolate the SERVER-SIDE placement. Fail hard if the placement column is absent
+    # rather than silently letting client-side (270562) revenue into this sheet.
+    plc_col = first_matching_column(df.columns, PLACEMENT_COL_CANDIDATES)
+    if plc_col is None:
+        sys.exit(
+            "ERROR: Placement column not found, so the server-side placement "
+            f"({SERVER_PLACEMENT_ID}) cannot be isolated — refusing to write mixed "
+            f"client+server data.\n       Found columns: {list(df.columns)}"
+        )
+    before = len(df)
+    df = df[df[plc_col].astype(str).str.strip() == SERVER_PLACEMENT_ID].copy()
+    log(f"Isolated server placement {SERVER_PLACEMENT_ID}: kept {len(df)}/{before} rows.")
+    if df.empty:
+        sys.exit(
+            f"ERROR: No rows for server placement {SERVER_PLACEMENT_ID} in the pulled "
+            "window — aborting rather than writing an empty/incorrect sheet."
+        )
+
+    df = df.dropna(subset=[site_col, date_col])
+    parsed = pd.to_datetime(df[date_col], errors="coerce")
+    bad = parsed.isna().sum()
+    if bad:
+        log(f"WARNING: {bad} row(s) had unparseable dates and will be dropped.")
+    df = df[parsed.notna()].copy()
+    df["__date"] = pd.to_datetime(df[date_col], errors="coerce")
+    if df.empty:
+        sys.exit("ERROR: No valid rows after date parsing — aborting.")
+
+    # Freshness guard, current-month-tolerant: the server-side placement is very
+    # low-volume (it can legitimately go quiet for stretches), so a somewhat-old
+    # newest date within the current month is acceptable. Only hard-fail when the
+    # newest date is OUTSIDE the current month (a genuinely stuck/wrong-month pull).
+    newest = df["__date"].max()
+    age_days = (datetime.now() - newest).days
+    newest_in_current_month = newest.strftime("%Y-%m") == datetime.now().strftime("%Y-%m")
+    if age_days > MAX_ALLOWED_AGE_DAYS and not newest_in_current_month:
+        sys.exit(
+            f"ERROR: Newest date in CSV is {newest.date()} ({age_days} days ago) and is "
+            "outside the current month — looks stuck/broken, aborting."
+        )
+    if age_days > MAX_ALLOWED_AGE_DAYS:
+        log(f"WARNING: newest date {newest.date()} is {age_days} days old but within the "
+            "current month — low-volume server placement. Writing available data.")
+
+    # Keep the FULL pulled window (Nexxen dateRange = LAST_30_DAYS) — do NOT
+    # MTD-filter. Refreshing the whole window lets the previous month's final day
+    # get its complete value once it's no longer "today"; the write step's
+    # per-(Domain, Date) dedup lets these fresh rows overwrite any frozen partial,
+    # and older history is preserved. Fixes the month-boundary freeze.
+    log(f"Keeping full pulled window: {len(df)} rows, {df['__date'].min().date()} → {df['__date'].max().date()}.")
+
+    out = pd.DataFrame({
+        "Date":            df["__date"].dt.strftime("%Y-%m-%d"),
+        "Site/App Bundle": df[site_col].astype(str).str.strip(),
+        "Impressions":     pd.to_numeric(df[impr_col], errors="coerce").fillna(0),
+        "Revenue":         pd.to_numeric(df[rev_col],  errors="coerce").fillna(0),
+        "eCPM":            pd.to_numeric(df[ecpm_col], errors="coerce").fillna(0),
+    })
+    out = out[~out["Site/App Bundle"].str.lower().isin(["", "nan", "none"])]
+    if out.empty:
+        sys.exit("ERROR: No valid rows after cleaning — aborting.")
+
+    log(f"CSV valid: {len(out)} rows, dates {out['Date'].min()} → {out['Date'].max()}")
+    return out
+
+
+# ── Step 3 — Upsert into Google Sheets ────────────────────────────────────────
+
+def upsert_to_sheet(df: pd.DataFrame, creds) -> None:
+    """MTD-only mode: replace the sheet contents with the freshly-pulled MTD rows."""
+    log("Connecting to Google Sheets…")
+    service = build("sheets", "v4", credentials=creds, cache_discovery=False)
+
+
+    # Auto-detect the first tab name (sheet might not be called "Sheet1").
+    _sheet_id = 0
+    try:
+        _meta = service.spreadsheets().get(
+            spreadsheetId=SPREADSHEET_ID, fields="sheets.properties(title,sheetId)"
+        ).execute()
+        _props = _meta["sheets"][0]["properties"]
+        _tab = _props["title"]
+        _sheet_id = _props["sheetId"]
+    except Exception as _e:
+        _tab = SHEET_NAME
+    log(f"Using sheet tab: {_tab!r}")
+    rows = [
+        [
+            str(r["Site/App Bundle"]).strip(),
+            str(r["Date"]).strip(),
+            _fmt_money(pd.to_numeric(r["Revenue"], errors="coerce") or 0),
+            int(pd.to_numeric(r["Impressions"], errors="coerce") or 0),
+            float(pd.to_numeric(r["eCPM"], errors="coerce") or 0),
+        ]
+        for _, r in df.iterrows()
+    ]
+    rows = _normalize_and_aggregate(rows)
+    rows.sort(key=lambda r: (r[0], r[1]))     # Date asc, Site asc
+    rows.sort(key=lambda r: r[0], reverse=True)  # then Date desc (stable)
+
+    # Preserve previous-month rows; only the current month gets refreshed.
+
+
+    existing = service.spreadsheets().values().get(
+
+
+        spreadsheetId=SPREADSHEET_ID, range=_tab,
+
+
+    ).execute().get("values", [])
+
+
+    current_month = datetime.now().strftime("%Y-%m")
+
+
+    preserved = []
+
+
+    for _r in existing:
+
+
+        if not _r or _r == HEADER:
+
+
+            continue
+
+
+        if len(_r) >= 2 and str(_r[1]).strip().startswith(current_month):
+
+
+            continue  # current-month row → will be replaced by fresh data
+
+
+        preserved.append(_r)
+
+
+    merged = rows + preserved
+
+    # Guarantee ONE row per (Domain, Date) across the WHOLE sheet — not just the
+    # fresh rows. `rows` (this run's data) are listed first, so on any collision
+    # the fresh value wins and stale/duplicate preserved-history rows are dropped.
+    # This makes every write self-healing: it repairs pre-existing duplicate
+    # history (which had inflated month totals) instead of freezing it forever.
+    _seen = set()
+    _deduped = []
+    for _r in merged:
+        _key = (str(_r[0]).strip().lower(), str(_r[1]).strip()) if len(_r) >= 2 else None
+        if _key is not None and _key in _seen:
+            continue
+        if _key is not None:
+            _seen.add(_key)
+        _deduped.append(_r)
+    merged = _deduped
+
+
+    merged.sort(key=lambda r: (str(r[1]) if len(r) > 1 else "", str(r[0]) if len(r) > 0 else ""))
+
+
+    merged.sort(key=lambda r: str(r[1]) if len(r) > 1 else "", reverse=True)
+
+
+
+    def _stringify(cell):
+        if cell is None:
+            return ""
+        if isinstance(cell, (int, float)):
+            if isinstance(cell, float) and (cell != cell):  # NaN check
+                return ""
+            return cell
+        return str(cell)
+    merged = [[_stringify(c) for c in r] for r in merged]
+    final_rows = [HEADER] + merged
+    log(f"Writing {len(merged)} rows = {len(rows)} new MTD + {len(preserved)} preserved (history)…")
+    service.spreadsheets().values().clear(
+        spreadsheetId=SPREADSHEET_ID, range=_tab, body={},
+    ).execute()
+    service.spreadsheets().values().update(
+        spreadsheetId=SPREADSHEET_ID,
+        range=f"{_tab}!A1",
+        valueInputOption="USER_ENTERED",
+        body={"values": final_rows},
+    ).execute()
+
+    # Stamp the adaptive revenue number format on every data row so full precision
+    # is visible (overrides the sticky currency format values().update() applies).
+    try:
+        fmt_rows = [
+            {"values": [{"userEnteredFormat": {"numberFormat": {
+                "type": "NUMBER", "pattern": REVENUE_NUMBER_FORMAT}}}]}
+            for _ in range(len(merged))
+        ]
+        service.spreadsheets().batchUpdate(
+            spreadsheetId=SPREADSHEET_ID,
+            body={"requests": [{"updateCells": {
+                "start": {"sheetId": _sheet_id, "rowIndex": 1,
+                          "columnIndex": REVENUE_COL_INDEX},
+                "rows": fmt_rows,
+                "fields": "userEnteredFormat.numberFormat",
+            }}]},
+        ).execute()
+    except Exception as e:
+        log(f"WARNING: could not stamp revenue number format (display only): {e}")
+
+    log("Sheet updated successfully.")
+
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+
+def main():
+    log("=== Nexxen API → Google Sheets daily sync ===")
+    cfg   = load_config()
+    creds = load_service_account()
+
+    token    = login(cfg["nexxen_api_username"], cfg["nexxen_api_password"])
+    filename = request_detailed_report(token, cfg["nexxen_api_key"])
+    df       = fetch_csv(token, cfg["nexxen_api_key"], filename)
+    df       = process_df(df)
+    upsert_to_sheet(df, creds)
+
+    log("=== Done. ===")
+
+
+if __name__ == "__main__":
+    main()
