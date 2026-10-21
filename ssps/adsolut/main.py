@@ -115,19 +115,28 @@ def log(msg: str) -> None:
 
 
 _REQUIRED_KEYS = ("adsolut_username", "adsolut_password")
+# We run MULTIPLE Adsolut accounts into the SAME sheet (each account = a separate
+# login with its own site(s)). Account 1 is adsolut_username/adsolut_password
+# (required); extra accounts are adsolut_username2/adsolut_password2, …3, … up to
+# _MAX_ACCOUNTS (all optional). On the cloud these are flat Streamlit secrets
+# (ADSOLUT_USERNAME2 / ADSOLUT_PASSWORD2, …).
+_MAX_ACCOUNTS = 9
 
 
 def load_config() -> dict:
     """Credentials: env vars first (UPPER_CASE), then config.json fallback."""
+    keys = list(_REQUIRED_KEYS)
+    for n in range(2, _MAX_ACCOUNTS + 1):
+        keys += [f"adsolut_username{n}", f"adsolut_password{n}"]
     cfg = {}
-    for k in _REQUIRED_KEYS:
+    for k in keys:
         v = os.environ.get(k.upper())
         if v:
             cfg[k] = v
     if CONFIG_PATH.exists():
         try:
             file_cfg = json.loads(CONFIG_PATH.read_text())
-            for k in _REQUIRED_KEYS:
+            for k in keys:
                 if not cfg.get(k) and file_cfg.get(k):
                     cfg[k] = file_cfg[k]
         except Exception:
@@ -140,6 +149,17 @@ def load_config() -> dict:
             f"Set env vars [{env_names}] or fill config.json."
         )
     return cfg
+
+
+def adsolut_accounts(cfg: dict) -> list:
+    """Return the (username, password) pairs present in cfg, account 1 first.
+    Account 1 is required; accounts 2..N are optional (adsolut_username2/… etc.)."""
+    accts = [(cfg["adsolut_username"], cfg["adsolut_password"])]
+    for n in range(2, _MAX_ACCOUNTS + 1):
+        u, p = cfg.get(f"adsolut_username{n}"), cfg.get(f"adsolut_password{n}")
+        if u and p:
+            accts.append((u, p))
+    return accts
 
 
 
@@ -424,39 +444,19 @@ def write_sheet(df: pd.DataFrame, creds) -> None:
     rows.sort(key=lambda r: (r[0], r[1]))
     rows.sort(key=lambda r: r[0], reverse=True)
 
-    # Preserve previous-month rows; only the current month gets refreshed.
-
-
+    # Preserve ALL existing rows; the fresh pull overwrites matching (Domain, Date)
+    # via the fresh-first dedup below. This is REQUIRED for the multi-account setup:
+    # if one account is skipped this run (login/empty/stale), its rows must survive
+    # instead of being wiped. Each (Domain, Date) is refreshed when its account
+    # returns it and preserved otherwise. (The accounts cover different sites, so
+    # there is no cross-account collision — only self-refresh.)
     existing = service.spreadsheets().values().get(
-
-
         spreadsheetId=SPREADSHEET_ID, range=_tab,
-
-
     ).execute().get("values", [])
-
-
-    current_month = datetime.now().strftime("%Y-%m")
-
-
     preserved = []
-
-
     for _r in existing:
-
-
         if not _r or _r == HEADER:
-
-
             continue
-
-
-        if len(_r) >= 2 and str(_r[1]).strip().startswith(current_month):
-
-
-            continue  # current-month row → will be replaced by fresh data
-
-
         preserved.append(_r)
 
 
@@ -516,12 +516,28 @@ def main():
     cfg   = load_config()
     creds = load_service_account()
 
-    csv_path = download_adsolut_csv(cfg["adsolut_username"], cfg["adsolut_password"])
-    df       = process_csv(csv_path)
-    write_sheet(df, creds)
+    accts = adsolut_accounts(cfg)
+    log(f"{len(accts)} Adsolut account(s) to pull into this sheet.")
+    frames = []
+    for i, (user, pw) in enumerate(accts, 1):
+        log(f"--- Account {i}/{len(accts)}: {user} ---")
+        try:
+            csv_path = download_adsolut_csv(user, pw)
+            frames.append(process_csv(csv_path))
+            try: csv_path.unlink()
+            except Exception: pass
+        except SystemExit as e:
+            # One account failing (login/empty/stale) must not sink the others or
+            # wipe their data: skip it and keep going. write_sheet preserves ALL
+            # existing rows, so a skipped account keeps its last-run data.
+            log(f"WARNING: account {i} ({user}) failed or had no usable data "
+                f"({e}); skipping it this run.")
 
-    try: csv_path.unlink()
-    except Exception: pass
+    if not frames:
+        sys.exit("ERROR: all Adsolut accounts failed — sheet left unchanged.")
+    df = pd.concat(frames, ignore_index=True)
+    log(f"Combined {len(frames)}/{len(accts)} account(s): {len(df)} rows total.")
+    write_sheet(df, creds)
     log("=== Done. ===")
 
 
