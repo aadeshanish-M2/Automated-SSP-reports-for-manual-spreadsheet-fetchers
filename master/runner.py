@@ -27,6 +27,7 @@ SSPS = [
     ("MGID",       SSPS_DIR / "mgid"),
     ("Kuantyx",    SSPS_DIR / "kuantyx"),
     ("Adsolut",    SSPS_DIR / "adsolut"),
+    ("Equativ",    SSPS_DIR / "equativ"),
     ("Yandex",     SSPS_DIR / "yandex"),
     ("Insticator", SSPS_DIR / "insticator"),
     ("Vidoomy",    SSPS_DIR / "vidoomy"),
