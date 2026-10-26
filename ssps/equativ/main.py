@@ -2,12 +2,15 @@
 """
 Equativ (Reporting API) → Google Sheets daily sync.   [SPLIT: CLIENT + SERVER-SIDE]
 
-Equativ carries BOTH client-side and server-side header-bidding sites on one account.
-We pull a single month-to-date report grouped by Day + domain + Header Bidding Type,
-then SPLIT the rows by that type into two separate sheets:
+Equativ carries BOTH client-side and server-side demand on one account. We pull a
+single month-to-date report grouped by Day + domain + ServerSideBiddingCallerName,
+then SPLIT the rows by that caller into two separate sheets:
 
-  • Server Side Header Bidding → the Equativ-S2S sheet, revenue net of a 7% S2S fee
-  • Client Side Header Bidding → the Equativ (client) sheet, no fee
+  • PrebidServer → the Equativ-S2S sheet, revenue net of a 7% S2S fee
+  • N/A         → the Equativ (client) sheet, no fee
+  • Google (and any other caller) → IGNORED — this is open-bidding revenue and must
+    NOT appear in either sheet. (The earlier HeaderBiddingType split wrongly lumped
+    Google open bidding in with server-side; the caller dimension separates it.)
 
 CPM is recomputed from the (fee-adjusted) revenue on each sheet. Sub-cent values are
 stored at full precision. Previous-month history is preserved on each sheet.
@@ -20,7 +23,7 @@ Mapping (Equativ → uniform):
                Revenue / AdServing / AdNetwork all come back 0; Gross is ~15% higher).
   Impression = Impressions
   CPM        = recomputed revenue/impressions*1000 (net of the fee on the S2S sheet)
-  split on   = HeaderBiddingTypeName  (Client Side / Server Side Header Bidding)
+  split on   = ServerSideBiddingCallerName  (PrebidServer=S2S · N/A=client · Google=ignore)
 
 API ref: https://help.equativ.com/reporting-api-get-started
   Token : POST https://login.eqtv.io/oauth2/token  (OAuth2 client_credentials → Bearer)
@@ -241,14 +244,14 @@ def fetch_report(cfg: dict) -> list:
         "reportName": "mm_daily_split",
         "startDate": f"{first.isoformat()}T00:00:00",
         "endDate":   f"{end.isoformat()}T00:00:00",
-        "dimensions": ["Day", "AppOrSiteDomain", "HeaderBiddingTypeName"],
+        "dimensions": ["Day", "AppOrSiteDomain", "ServerSideBiddingCallerName"],
         "metrics":    ["Impressions", "EstimatedPublisherNetRevenuePublisherCurrency"],
         "useCaseId":  "Holistic",
         "timezone":   "UTC",
         "dateFormat": "yyyy-MM-dd",
     }
     log(f"Submitting MTD report {first.isoformat()} → {today.isoformat()} "
-        "(Day + domain + HeaderBiddingType)…")
+        "(Day + domain + ServerSideBiddingCaller)…")
     r = requests.post(REPORT_URL, json=body, headers=H, timeout=60)
     if r.status_code != 200:
         sys.exit(f"ERROR: report submission failed ({r.status_code}): {r.text[:300]}")
@@ -309,11 +312,11 @@ def process_and_split(records: list):
     df = pd.DataFrame(records)
     date_col = _col(df, "Day", "Date")
     dom_col  = _col(df, "App Or Site Domain", "AppOrSiteDomain", "Domain")
-    hb_col   = _col(df, "Header Bidding Type Name", "HeaderBiddingTypeName")
+    caller_col = _col(df, "Server Side Bidding Caller Name", "ServerSideBiddingCallerName")
     imp_col  = _col(df, "Impressions")
     rev_col  = _col(df, "Estimated Net Revenue", "EstimatedPublisherNetRevenuePublisherCurrency")
     missing = [n for n, c in [("Day", date_col), ("AppOrSiteDomain", dom_col),
-                              ("HeaderBiddingTypeName", hb_col), ("Impressions", imp_col),
+                              ("ServerSideBiddingCallerName", caller_col), ("Impressions", imp_col),
                               ("Estimated Net Revenue", rev_col)] if c is None]
     if missing:
         sys.exit(f"ERROR: Could not find columns {missing} in the report.\n"
@@ -333,14 +336,18 @@ def process_and_split(records: list):
         sys.exit(f"ERROR: Newest date is {newest.date()} ({age_days} days ago) and is "
                  "outside the current month — looks stuck/broken, aborting.")
 
-    hb = df[hb_col].astype(str).str.strip().str.lower()
-    is_server = hb.str.contains("server side")
-    is_client = hb.str.contains("client side")
-    unknown = ~(is_server | is_client)
-    if unknown.any():
-        vals = sorted(df.loc[unknown, hb_col].astype(str).unique())
-        log(f"WARNING: {int(unknown.sum())} row(s) have a non client/server HB type {vals} — "
-            "routing them to the CLIENT sheet (no fee) to avoid mis-applying the S2S fee.")
+    # Split by the server-side-bidding caller:
+    #   PrebidServer → S2S (7% fee) · N/A → client (no fee) · everything else
+    #   (Google = open bidding, and any other caller) → IGNORED, in neither sheet.
+    caller = df[caller_col].astype(str).str.strip().str.lower()
+    is_server = caller.str.contains("prebid")
+    is_client = caller.isin(["n/a", "na", ""])
+    ignored = ~(is_server | is_client)
+    if ignored.any():
+        from collections import Counter
+        vals = Counter(df.loc[ignored, caller_col].astype(str))
+        log(f"Ignoring {int(ignored.sum())} row(s) by caller (open bidding / other, in "
+            f"NEITHER sheet): {dict(vals)}")
 
     def shape(mask):
         d = df[mask]
@@ -357,9 +364,10 @@ def process_and_split(records: list):
                   | (pd.to_numeric(out["Revenue"], errors="coerce").fillna(0) > 0)]
         return out
 
-    server_df = shape(is_server)
-    client_df = shape(is_client | unknown)
-    log(f"Split: {len(server_df)} server-side rows, {len(client_df)} client-side rows.")
+    server_df = shape(is_server)        # PrebidServer
+    client_df = shape(is_client)        # N/A  (Google/other dropped entirely)
+    log(f"Split: {len(server_df)} server-side (PrebidServer) rows, "
+        f"{len(client_df)} client-side (N/A) rows.")
     if server_df.empty and client_df.empty:
         _empty_data_exit("no rows with activity after split")
     return server_df, client_df
