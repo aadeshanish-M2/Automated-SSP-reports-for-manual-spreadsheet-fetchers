@@ -32,7 +32,7 @@ import json
 import os
 import sys
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 import pandas as pd
 import requests
@@ -58,6 +58,10 @@ FETCH_THRESHOLD = 1000   # max rows Fetch Data returns (maxThresholdForFetchData
 
 MAX_ALLOWED_AGE_DAYS = 5
 HEADER = ["Domain", "Date", "Revenue", "Impression", "CPM"]
+
+# Pull window reaches back this far so the LAST day of a month keeps refreshing over
+# the next month's first days (data settles a few days late) instead of freezing partial.
+LOOKBACK_DAYS = 5
 
 # This Trusted Stack account is a pure server-side (S2S header-bidding) integration.
 # Server-side bidding carries a 7% service-provider fee that must be deducted from
@@ -273,16 +277,17 @@ def fetch_report(cfg: dict) -> list:
 
     today = date.today()
     first = date(today.year, today.month, 1)
+    start = min(first, today - timedelta(days=LOOKBACK_DAYS))
     body = {
         "viewId": VIEW_ID,
-        "startDateTime": f"{first.isoformat()}T00:00",
+        "startDateTime": f"{start.isoformat()}T00:00",
         "endDateTime":   f"{today.isoformat()}T23:59",
         "threshold":     FETCH_THRESHOLD,
         "dimensions":    ["day", "domain"],
         "metrics":       ["revenue", "ad_impressions"],
         "sortByMetric":  {"by": "revenue", "order": "DESC"},
     }
-    log(f"Requesting MTD report {first.isoformat()} → {today.isoformat()} "
+    log(f"Requesting MTD report {start.isoformat()} → {today.isoformat()} "
         f"(view {VIEW_ID}, dims day+domain)…")
     rr = _request_with_retry(sess, "POST", FETCH_URL, json=body,
                             headers={"Authorization": f"Bearer {token}",
@@ -347,14 +352,12 @@ def process_results(rows: list) -> pd.DataFrame:
             "the current month — Trusted Stack has no recent activity (low-volume "
             "account). Writing the available data instead of failing.")
 
-    # MTD filter with month-boundary fallback.
-    first_of_month = pd.Timestamp(datetime.now().replace(day=1).date())
-    _pre_mtd_df = df.copy()
-    df = df[df["__date"] >= first_of_month]
-    if df.empty:
-        log("WARNING: 0 rows match current-month filter — falling back to full report "
-            "(likely a month-boundary day).")
-        df = _pre_mtd_df
+    # Keep the FULL pulled window (it spans a few days into the previous month near a
+    # boundary) — do NOT MTD-filter. The write refreshes exactly the pulled dates via
+    # its fresh-first dedup and preserves older history, so the final day of the
+    # previous month gets FINALIZED instead of frozen partial.
+    log(f"Keeping full pulled window: {len(df)} rows, "
+        f"{df['__date'].min().date()} → {df['__date'].max().date()}.")
 
     out = pd.DataFrame({
         "Date":        df["__date"].dt.strftime("%Y-%m-%d"),

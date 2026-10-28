@@ -552,14 +552,12 @@ def process_report(data: list) -> pd.DataFrame:
             "within the current month — Rich Audience has no recent activity "
             "(low-volume account). Writing the available data instead of failing.")
 
-    # MTD filter with month-boundary fallback
-    first_of_month = pd.Timestamp(datetime.now().replace(day=1).date())
-    _pre_mtd_df = df.copy()
-    df = df[df["__date"] >= first_of_month]
-    if df.empty:
-        log("WARNING: 0 rows match current-month filter — falling back to full report "
-            "(likely a month-boundary day, MTD data not available yet).")
-        df = _pre_mtd_df
+    # Keep the FULL pulled window (it spans a few days into the previous month near a
+    # boundary) — do NOT MTD-filter. The write refreshes exactly the pulled dates via
+    # its fresh-first dedup and preserves older history, so the final day of the
+    # previous month gets FINALIZED instead of frozen partial.
+    log(f"Keeping full pulled window: {len(df)} rows, "
+        f"{df['__date'].min().date()} → {df['__date'].max().date()}.")
 
     out = pd.DataFrame({
         "Date":        df["__date"].dt.strftime("%Y-%m-%d"),

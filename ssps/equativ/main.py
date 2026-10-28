@@ -69,6 +69,10 @@ STATUS_SUCCESS, STATUS_FAILED, STATUS_DELETED = 1, 9, 17
 MAX_ALLOWED_AGE_DAYS = 5
 HEADER = ["Domain", "Date", "Revenue", "Impression", "CPM"]
 
+# Pull window reaches back this far so the LAST day of a month keeps refreshing over
+# the next month's first days (data settles a few days late) instead of freezing partial.
+LOOKBACK_DAYS = 5
+
 # Server-side (S2S) fee: 7% deducted from publisher-net revenue on the S2S sheet only.
 SERVER_SIDE_FEE = float(os.environ.get("EQUATIV_SERVER_SIDE_FEE") or 0.07)
 
@@ -239,10 +243,11 @@ def fetch_report(cfg: dict) -> list:
 
     today = date.today()
     first = today.replace(day=1)
+    start = min(first, today - timedelta(days=LOOKBACK_DAYS))
     end   = today + timedelta(days=1)   # endDate = next day 00:00 → full current day
     body = {
         "reportName": "mm_daily_split",
-        "startDate": f"{first.isoformat()}T00:00:00",
+        "startDate": f"{start.isoformat()}T00:00:00",
         "endDate":   f"{end.isoformat()}T00:00:00",
         "dimensions": ["Day", "AppOrSiteDomain", "ServerSideBiddingCallerName"],
         "metrics":    ["Impressions", "EstimatedPublisherNetRevenuePublisherCurrency"],
@@ -250,7 +255,7 @@ def fetch_report(cfg: dict) -> list:
         "timezone":   "UTC",
         "dateFormat": "yyyy-MM-dd",
     }
-    log(f"Submitting MTD report {first.isoformat()} → {today.isoformat()} "
+    log(f"Submitting MTD report {start.isoformat()} → {today.isoformat()} "
         "(Day + domain + ServerSideBiddingCaller)…")
     r = requests.post(REPORT_URL, json=body, headers=H, timeout=60)
     if r.status_code != 200:

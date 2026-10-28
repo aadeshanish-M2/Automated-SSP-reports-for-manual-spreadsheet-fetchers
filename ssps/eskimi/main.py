@@ -39,7 +39,7 @@ import json
 import os
 import sys
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 import pandas as pd
 import requests
@@ -65,6 +65,10 @@ API_CT     = "application/vnd.api+json"   # REQUIRED — application/json return
 
 MAX_ALLOWED_AGE_DAYS = 5
 HEADER = ["Domain", "Date", "Revenue", "Impression", "CPM"]
+
+# Pull window reaches back this far so the LAST day of a month keeps refreshing over
+# the next month's first days (data settles a few days late) instead of freezing partial.
+LOOKBACK_DAYS = 5
 
 # Server-side (S2S) integration: 7% service-provider fee deducted from publisher-net
 # revenue. Revenue is written net; CPM (= revenue/impressions*1000) drops the same 7%
@@ -257,13 +261,14 @@ def fetch_report(cfg: dict) -> list:
     }
     today = date.today()
     first = date(today.year, today.month, 1)
+    start = min(first, today - timedelta(days=LOOKBACK_DAYS))
     body = {
-        "filter":  {"date_from": first.isoformat(), "date_to": today.isoformat(), "timezone": 1},
+        "filter":  {"date_from": start.isoformat(), "date_to": today.isoformat(), "timezone": 1},
         "groupBy": {"date": True, "bundle_or_domain": True},
         "select":  {"impressions": True, "cost": True, "revenue_cpm": True},
     }
 
-    log(f"Requesting MTD publisher report {first.isoformat()} → {today.isoformat()} "
+    log(f"Requesting MTD publisher report {start.isoformat()} → {today.isoformat()} "
         "(groupBy date+bundle_or_domain)…")
     all_rows = []
     page = 1
@@ -329,13 +334,12 @@ def process_results(rows: list) -> pd.DataFrame:
             f"outside the current month — looks stuck/broken, aborting."
         )
 
-    # MTD filter with month-boundary fallback.
-    first_of_month = pd.Timestamp(datetime.now().replace(day=1).date())
-    _pre_mtd_df = df.copy()
-    df = df[df["__date"] >= first_of_month]
-    if df.empty:
-        log("WARNING: 0 rows match current-month filter — falling back to full report.")
-        df = _pre_mtd_df
+    # Keep the FULL pulled window (it spans a few days into the previous month near a
+    # boundary) — do NOT MTD-filter. The write refreshes exactly the pulled dates via
+    # its fresh-first dedup and preserves older history, so the final day of the
+    # previous month gets FINALIZED instead of frozen partial.
+    log(f"Keeping full pulled window: {len(df)} rows, "
+        f"{df['__date'].min().date()} → {df['__date'].max().date()}.")
 
     out = pd.DataFrame({
         "Date":        df["__date"].dt.strftime("%Y-%m-%d"),
