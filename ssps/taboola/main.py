@@ -88,6 +88,13 @@ HEADER = ["Domain", "Date", "Revenue", "Impression", "CPM"]
 # value — it only gates which current-month dates get refreshed.)
 CUTOVER = "2026-09-08"
 
+# Span the month boundary: the daily pull reaches back this many days so the LAST
+# day of a month keeps getting refreshed over the first days of the next month
+# (Taboola data settles ~3 days late). Without this, the final day of each month is
+# frozen as a partial day. Clamped to >= CUTOVER so we never re-pull into the old
+# (CAD) account's frozen pre-migration history.
+LOOKBACK_DAYS = 5
+
 MONTH_START_GRACE_DAYS = 5
 
 
@@ -276,13 +283,20 @@ def fetch_report(cfg: dict) -> list:
 
     today = date.today()
     first = date(today.year, today.month, 1)
+    # Start from the earlier of (first-of-month) or (today − LOOKBACK_DAYS) so the
+    # window always covers the full current month AND spans a few days into the
+    # previous month near a boundary. Clamp to >= CUTOVER (new account's data start).
+    start = min(first, today - timedelta(days=LOOKBACK_DAYS))
+    cutover_d = datetime.strptime(CUTOVER, "%Y-%m-%d").date()
+    if start < cutover_d:
+        start = cutover_d
     url = f"{BACKSTAGE}/api/1.0/{account}/reports/revenue-summary/dimensions/{DIMENSION}"
     headers = {"Authorization": f"Bearer {token}"}
-    log(f"Pulling per-site data {first.isoformat()} → {today.isoformat()} "
+    log(f"Pulling per-site data {start.isoformat()} → {today.isoformat()} "
         f"(site_breakdown, one call per day)…")
 
     rows, ok_days, forbidden = [], 0, 0
-    d = first
+    d = start
     while d <= today:
         ds = d.isoformat()
         try:
@@ -354,14 +368,12 @@ def process_results(results: list) -> pd.DataFrame:
             f"Expected within {MAX_ALLOWED_AGE_DAYS} days — aborting."
         )
 
-    # MTD filter with month-boundary fallback.
-    first_of_month = pd.Timestamp(datetime.now().replace(day=1).date())
-    _pre_mtd_df = df.copy()
-    df = df[df["__date"] >= first_of_month]
-    if df.empty:
-        log("WARNING: 0 rows match current-month filter — falling back to full report "
-            "(likely a month-boundary day).")
-        df = _pre_mtd_df
+    # Keep the FULL pulled window (it spans a few days into the previous month near
+    # a boundary) — do NOT MTD-filter. The write step refreshes exactly the pulled
+    # dates (>= CUTOVER) via its fresh-first dedup and preserves everything older, so
+    # the final day of the previous month gets FINALIZED instead of frozen partial.
+    log(f"Keeping full pulled window: {len(df)} rows, "
+        f"{df['__date'].min().date()} → {df['__date'].max().date()}.")
 
     out = pd.DataFrame({
         "Date":        df["__date"].dt.strftime("%Y-%m-%d"),
