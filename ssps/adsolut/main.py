@@ -34,7 +34,7 @@ LOGIN_URL = "https://manage.playstream.media/"
 
 # CSV column-name candidates — we'll fine-tune on first run once we see actual headers.
 DATE_COL_CANDIDATES = ["Date", "Day", "date", "day"]
-SITE_COL_CANDIDATES = ["Domain", "Domains", "Website", "Site", "domain"]
+SITE_COL_CANDIDATES = ["Domain", "Domain/Bundle", "Domains", "Website", "Site", "domain"]
 IMPR_COL_CANDIDATES = ["Impressions", "Impression", "Imps", "impressions", "impression"]
 REV_COL_CANDIDATES  = ["Revenue", "Revenue, $", "Earnings", "revenue"]
 ECPM_COL_CANDIDATES = ["Gross CPM", "Gross CPM ($)", "Gross eCPM",
@@ -248,7 +248,20 @@ def download_adsolut_csv(username: str, password: str) -> Path:
         except Exception as e:
             log(f"WARNING: date-range selector failed: {e}")
 
-        def pick_via_plus(section_index: int, option_label: str, search_term: str = ""):
+        def _close_picker():
+            # Always dismiss an open overlay — a picker left open (e.g. after an
+            # option-not-found miss) leaves a backdrop that blocks every later click.
+            try:
+                page.keyboard.press("Escape")
+                page.wait_for_function(
+                    "() => document.querySelectorAll('.cdk-overlay-backdrop-showing').length === 0",
+                    timeout=8_000,
+                )
+            except Exception:
+                pass
+            page.wait_for_timeout(400)
+
+        def pick_via_plus(section_index: int, option_label, search_term: str = ""):
             """
             Open the "+" picker in the given section (0 = Dimensions, 1 = Metrics)
             and click the option with an EXACT-match label. Optionally filter the
@@ -263,27 +276,23 @@ def download_adsolut_csv(username: str, password: str) -> Path:
                         page.wait_for_timeout(600)
                     except Exception:
                         pass
-                page.locator('.cdk-overlay-container').get_by_text(
-                    option_label, exact=True
-                ).first.click(timeout=5000)
+                # option_label may be a list of aliases (Adsolut renames options,
+                # e.g. "Domain" → "Domain/Bundle" in 2026-11); pick the first present.
+                labels = [option_label] if isinstance(option_label, str) else list(option_label)
+                overlay = page.locator('.cdk-overlay-container')
+                chosen = next((l for l in labels
+                               if overlay.get_by_text(l, exact=True).count() > 0), labels[0])
+                overlay.get_by_text(chosen, exact=True).first.click(timeout=5000)
                 page.wait_for_timeout(600)
-                # Close picker reliably so the next picker open works cleanly.
-                page.keyboard.press("Escape")
-                try:
-                    page.wait_for_function(
-                        "() => document.querySelectorAll('.cdk-overlay-backdrop-showing').length === 0",
-                        timeout=8_000,
-                    )
-                except Exception:
-                    pass
-                page.wait_for_timeout(400)
-                log(f"  → added '{option_label}'")
+                _close_picker()
+                log(f"  → added '{chosen}'")
             except Exception as e:
+                _close_picker()
                 log(f"WARNING: could not add '{option_label}': {e}")
 
         log("Choosing Dimensions: Date, Domain…")
         pick_via_plus(0, "Date")
-        pick_via_plus(0, "Domain", search_term="domain")
+        pick_via_plus(0, ["Domain/Bundle", "Domain"], search_term="domain")
 
         log("Choosing Metrics: Impression, Revenue, Gross CPM ($)…")
         pick_via_plus(1, "Impression",   search_term="impression")
