@@ -276,7 +276,11 @@ def download_kuantyx_csv(username: str, password: str) -> Path:
             # instead verified downstream against the real data: process_csv()
             # filters to the current month and aborts if the newest date is stale
             # (which is what actually catches a wrong-month pull).
-            page.locator('.kv-drp-dropdown').first.click(timeout=10_000)
+            # Kuantyx renamed the picker wrapper class .kv-drp-dropdown →
+            # .daterange-dropdown (2026-11); accept either so a rename back or
+            # forward doesn't break the run.
+            _DRP = '#date_range-container .daterange-dropdown, .daterange-dropdown, .kv-drp-dropdown'
+            page.locator(_DRP).first.click(timeout=10_000)
             page.wait_for_timeout(1000)
             page.evaluate("""() => {
                 const li = [...document.querySelectorAll('li[data-range-key]')]
@@ -284,8 +288,8 @@ def download_kuantyx_csv(username: str, password: str) -> Path:
                 if (li) li.click();
             }""")
             page.wait_for_timeout(1200)
-            label = page.locator('.kv-drp-dropdown .range-name').first.inner_text(timeout=5000)
-            log(f"  clicked 'Last 30 Days' preset (picker label reads {label!r}; "
+            label = page.locator('#date_range').first.input_value(timeout=5000)
+            log(f"  clicked 'Last 30 Days' preset (date_range = {label!r}; "
                 "actual range verified from CSV dates below)")
         except PlaywrightTimeoutError as e:
             browser.close()
