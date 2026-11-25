@@ -43,6 +43,7 @@ SSPS = [
     ("Epsilon-S2S HB", SSPS_DIR / "epsilon"),
     ("Meetscale-S2S", SSPS_DIR / "meetscale"),
     ("Eskimi-S2S", SSPS_DIR / "eskimi"),
+    ("AdaptMX-S2S", SSPS_DIR / "adaptmx"),
     # Connatix runs last because its refresh can take 5+ min and we'd rather
     # not block the fast ones behind it.
     ("Connatix",   SSPS_DIR / "connatix"),
